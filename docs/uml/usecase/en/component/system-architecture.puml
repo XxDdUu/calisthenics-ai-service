@@ -1,0 +1,39 @@
+@startuml
+left to right direction
+
+actor "User" as User
+actor "AI Analysis Service" as AI
+
+rectangle "Calisthenics Analysis System" {
+
+    usecase "Upload Video" as UC1
+    usecase "Analyze Fitness Movement" as UC2
+    usecase "Extract Video Frames" as UC3
+    usecase "Pose Detection" as UC4
+    usecase "Movement Evaluation" as UC5
+    usecase "Generate Analysis Results" as UC6
+    usecase "View Analysis Results" as UC7
+    usecase "Real-Time Movement Analysis" as UC8
+    usecase "Real-Time Feedback" as UC9
+
+    User --> UC1
+    User --> UC2
+    User --> UC7
+    User --> UC8
+
+    UC2 ..> UC3 : <<include>>
+    UC2 ..> UC4 : <<include>>
+    UC2 ..> UC5 : <<include>>
+    UC2 ..> UC6 : <<include>>
+
+    UC8 ..> UC4 : <<include>>
+    UC8 ..> UC5 : <<include>>
+    UC8 ..> UC9 : <<include>>
+
+    AI --> UC4
+    AI --> UC5
+    AI --> UC6
+    AI --> UC9
+}
+
+@enduml

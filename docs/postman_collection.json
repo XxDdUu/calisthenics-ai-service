@@ -1,0 +1,436 @@
+{
+	"info": {
+		"_postman_id": "calisthenics-ai-full-system-collection",
+		"name": "Calisthenics AI Full System (Docker Compose)",
+		"description": "Postman Collection for testing Calisthenics AI System via Docker Compose: Direct AI Service (Port 8000) & Spring Boot Backend Microservice (Port 8080). Supports user-selected Planche progression form assessment (Tuck, Advanced Tuck, Straddle, Full Planche), annotated skeleton image exports, video timeline hold analysis, and authenticated backend workflows.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{
+			"key": "aiServiceUrl",
+			"value": "http://localhost:8000",
+			"type": "string"
+		},
+		{
+			"key": "backendUrl",
+			"value": "http://localhost:8080",
+			"type": "string"
+		},
+		{
+			"key": "jwtToken",
+			"value": "",
+			"type": "string"
+		}
+	],
+	"item": [
+		{
+			"name": "1. Direct AI Service (Port 8000)",
+			"item": [
+				{
+					"name": "Health Check",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{aiServiceUrl}}/health",
+							"host": [
+								"{{aiServiceUrl}}"
+							],
+							"path": [
+								"health"
+							]
+						},
+						"description": "Check Python FastAPI service status, PyTorch compute device, and loaded YOLO-Pose model."
+					},
+					"response": []
+				},
+				{
+					"name": "List Supported Exercises",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{aiServiceUrl}}/api/v1/analysis/exercises",
+							"host": [
+								"{{aiServiceUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"analysis",
+								"exercises"
+							]
+						},
+						"description": "List supported exercises, progressions (Tuck, Advanced Tuck, Straddle, Full Planche), and biomechanical target criteria."
+					},
+					"response": []
+				},
+				{
+					"name": "Analyze Image (Direct AI)",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "file",
+									"type": "file",
+									"description": "Select JPEG or PNG image file"
+								}
+							]
+						},
+						"url": {
+							"raw": "{{aiServiceUrl}}/api/v1/analysis/image?target_progression=Full Planche&draw_overlay=true",
+							"host": [
+								"{{aiServiceUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"analysis",
+								"image"
+							],
+							"query": [
+								{
+									"key": "target_progression",
+									"value": "Full Planche",
+									"description": "Target progression to evaluate: 'Tuck Planche', 'ADV_TUCK_PLANCHE', 'Straddle Planche', or 'Full Planche' (default: Full Planche)"
+								},
+								{
+									"key": "draw_overlay",
+									"value": "true",
+									"description": "Whether to return base64 annotated image overlay in response"
+								}
+							]
+						},
+						"description": "Upload image directly to FastAPI service to detect pose keypoints, evaluate biomechanical rules against selected target progression, and return explainable form scores and structured issue details."
+					},
+					"response": []
+				},
+				{
+					"name": "Export Draw Skeleton Image (Direct AI)",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "file",
+									"type": "file",
+									"description": "Select JPEG or PNG image file"
+								}
+							]
+						},
+						"url": {
+							"raw": "{{aiServiceUrl}}/api/v1/analysis/image/draw-skeleton?target_progression=Full Planche",
+							"host": [
+								"{{aiServiceUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"analysis",
+								"image",
+								"draw-skeleton"
+							],
+							"query": [
+								{
+									"key": "target_progression",
+									"value": "Full Planche",
+									"description": "Target progression for annotated overlay rendering: 'Tuck Planche', 'ADV_TUCK_PLANCHE', 'Straddle Planche', or 'Full Planche'"
+								}
+							]
+						},
+						"description": "Upload image directly and download/view the annotated JPEG image file with drawn pose skeleton, keypoint lines, and form evaluation overlay."
+					},
+					"response": []
+				},
+				{
+					"name": "Analyze Video (Direct AI)",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "file",
+									"type": "file",
+									"description": "Select video file (MP4, MOV, AVI)"
+								}
+							]
+						},
+						"url": {
+							"raw": "{{aiServiceUrl}}/api/v1/analysis/video?target_progression=Full Planche&sample_fps=5",
+							"host": [
+								"{{aiServiceUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"analysis",
+								"video"
+							],
+							"query": [
+								{
+									"key": "target_progression",
+									"value": "Full Planche",
+									"description": "Target progression to evaluate: 'Tuck Planche', 'ADV_TUCK_PLANCHE', 'Straddle Planche', or 'Full Planche'"
+								},
+								{
+									"key": "sample_fps",
+									"value": "5",
+									"description": "Frames per second to sample for video analysis (1 to 30, default: 5)"
+								}
+							]
+						},
+						"description": "Upload video directly to FastAPI service for frame-by-frame pose estimation, target progression rule evaluation, hold duration calculation, and video breakdown."
+					},
+					"response": []
+				}
+			],
+			"description": "Direct requests to FastAPI AI Microservice (Port 8000 - No authentication required)."
+		},
+		{
+			"name": "2. Backend Service (Port 8080 - Docker)",
+			"item": [
+				{
+					"name": "Auth - Register",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"user@example.com\",\n  \"username\": \"testuser\",\n  \"password\": \"Password123!\"\n}"
+						},
+						"url": {
+							"raw": "{{backendUrl}}/api/v1/auth/register",
+							"host": [
+								"{{backendUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"auth",
+								"register"
+							]
+						},
+						"description": "Register new user account in Spring Boot backend."
+					},
+					"response": []
+				},
+				{
+					"name": "Auth - Login",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"var jsonData = pm.response.json();",
+									"if (jsonData.token) {",
+									"    pm.collectionVariables.set('jwtToken', jsonData.token);",
+									"    console.log('JWT Token saved:', jsonData.token);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"user@example.com\",\n  \"password\": \"Password123!\"\n}"
+						},
+						"url": {
+							"raw": "{{backendUrl}}/api/v1/auth/login",
+							"host": [
+								"{{backendUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"auth",
+								"login"
+							]
+						},
+						"description": "Login to receive JWT token. Automatically saves token to {{jwtToken}} variable."
+					},
+					"response": []
+				},
+				{
+					"name": "Analyze Image (via Backend)",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{jwtToken}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "file",
+									"type": "file",
+									"description": "Select image file"
+								}
+							]
+						},
+						"url": {
+							"raw": "{{backendUrl}}/api/v1/analysis/image?exerciseId=1",
+							"host": [
+								"{{backendUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"analysis",
+								"image"
+							],
+							"query": [
+								{
+									"key": "exerciseId",
+									"value": "1",
+									"description": "Optional exercise database ID"
+								}
+							]
+						},
+						"description": "Send image through Spring Boot Backend (Authenticated). Runs AI model and saves result to DB."
+					},
+					"response": []
+				},
+				{
+					"name": "Analyze Video (via Backend)",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{jwtToken}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "file",
+									"type": "file",
+									"description": "Select video file"
+								}
+							]
+						},
+						"url": {
+							"raw": "{{backendUrl}}/api/v1/analysis/video?exerciseId=1",
+							"host": [
+								"{{backendUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"analysis",
+								"video"
+							],
+							"query": [
+								{
+									"key": "exerciseId",
+									"value": "1",
+									"description": "Optional exercise database ID"
+								}
+							]
+						},
+						"description": "Send video through Spring Boot Backend (Authenticated). Runs AI model and saves result to DB."
+					},
+					"response": []
+				},
+				{
+					"name": "Get User Analysis History",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{jwtToken}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{backendUrl}}/api/v1/analysis/history",
+							"host": [
+								"{{backendUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"analysis",
+								"history"
+							]
+						},
+						"description": "Fetch user's past AI form analysis history from database."
+					},
+					"response": []
+				},
+				{
+					"name": "Get Analysis Detail by ID",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{jwtToken}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{backendUrl}}/api/v1/analysis/1",
+							"host": [
+								"{{backendUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"analysis",
+								"1"
+							]
+						},
+						"description": "Get detailed analysis report by analysis ID."
+					},
+					"response": []
+				}
+			],
+			"description": "Authenticated requests routed through Spring Boot Backend Microservice (Port 8080)."
+		}
+	]
+}

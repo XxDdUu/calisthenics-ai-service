@@ -1,0 +1,39 @@
+@startuml
+left to right direction
+
+actor "用户" as User
+actor "AI 分析服务" as AI
+
+rectangle "健身动作分析系统" {
+
+    usecase "上传视频" as UC1
+    usecase "分析健身动作" as UC2
+    usecase "提取视频帧" as UC3
+    usecase "人体姿态检测" as UC4
+    usecase "动作评估" as UC5
+    usecase "生成分析结果" as UC6
+    usecase "查看分析结果" as UC7
+    usecase "实时动作分析" as UC8
+    usecase "实时反馈" as UC9
+
+    User --> UC1
+    User --> UC2
+    User --> UC7
+    User --> UC8
+
+    UC2 ..> UC3 : <<include>>
+    UC2 ..> UC4 : <<include>>
+    UC2 ..> UC5 : <<include>>
+    UC2 ..> UC6 : <<include>>
+
+    UC8 ..> UC4 : <<include>>
+    UC8 ..> UC5 : <<include>>
+    UC8 ..> UC9 : <<include>>
+
+    AI --> UC4
+    AI --> UC5
+    AI --> UC6
+    AI --> UC9
+}
+
+@enduml
