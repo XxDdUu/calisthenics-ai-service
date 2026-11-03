@@ -1,0 +1,50 @@
+name: AI Service CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-ai-service-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-validate:
+    name: Test & Validate AI Service
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install uv Package Manager
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          version: 'latest'
+
+      - name: Install Runtime & Test Dependencies
+        run: uv sync --frozen
+
+      - name: Run PyTest Suite
+        env:
+          YOLO_VERBOSE: "False"
+        run: uv run pytest -v
+
+      - name: Validate FastAPI Application Initialization
+        env:
+          YOLO_VERBOSE: "False"
+        run: |
+          uv run python -c "import app.main; print('FastAPI service initialized successfully')"
+

@@ -15,22 +15,27 @@ WORKDIR /app
 # Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-# Copy dependency files first for Docker layer caching
+# Optimize uv
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/app/.venv
+
+# Copy dependency files first for layer caching
 COPY pyproject.toml uv.lock ./
 
-# Install Python dependencies
+# Install runtime dependencies
 RUN uv sync --frozen --no-dev
 
 # Copy application source code
 COPY . /app/
 
-# Create models directory for YOLO weights storage
+# Create models directory
 RUN mkdir -p /app/models
 
 EXPOSE 8000
 
-ENV HOST=0.0.0.0
-ENV PORT=8000
-ENV MODEL_PATH=yolov8n-pose.pt
+ENV HOST=0.0.0.0 \
+    PORT=8000 \
+    MODEL_PATH=yolov8n-pose.pt
 
-CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["/app/.venv/bin/uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
