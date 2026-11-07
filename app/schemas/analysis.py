@@ -348,3 +348,53 @@ class LiveSessionInfo(BaseModel):
         "populate_by_name": True
     }
 
+
+# ==============================================================================
+# End-to-End AI Video Scoring & Keypoints Visualization Schemas
+# ==============================================================================
+
+class VideoKeypointItem(BaseModel):
+    name: str = Field(..., description="COCO joint landmark name (e.g. left_shoulder)")
+    x: float = Field(..., description="Normalized [0.0, 1.0] X coordinate relative to video width")
+    y: float = Field(..., description="Normalized [0.0, 1.0] Y coordinate relative to video height")
+    confidence: float = Field(..., description="Detection confidence score [0.0, 1.0]")
+
+
+class VideoKeypointFrame(BaseModel):
+    frameIndex: int = Field(..., description="Original video frame index")
+    timestampMs: int = Field(..., description="Frame timestamp in milliseconds")
+    keypoints: List[VideoKeypointItem] = Field(default_factory=list, description="17 COCO keypoints")
+
+
+class VideoKeypointsData(BaseModel):
+    format: str = Field("COCO_17", description="Pose model landmark topology")
+    coordinateSystem: str = Field("NORMALIZED", description="Normalized 0.0-1.0 coordinates")
+    frames: List[VideoKeypointFrame] = Field(default_factory=list, description="All analyzed video frames keypoints")
+
+
+class VideoOutputMetadata(BaseModel):
+    originalAvailable: bool = Field(True, description="Original video availability")
+    annotatedAvailable: bool = Field(True, description="Annotated skeleton video availability")
+    originalObjectKey: Optional[str] = Field(None, description="MinIO object key for original video")
+    annotatedObjectKey: Optional[str] = Field(None, description="MinIO object key for annotated video")
+    durationMs: int = Field(..., description="Original video duration in milliseconds")
+    width: int = Field(..., description="Video frame width in pixels")
+    height: int = Field(..., description="Video frame height in pixels")
+    fps: float = Field(..., description="Video frame rate (frames per second)")
+
+
+class VideoScoringResponse(BaseModel):
+    analysisId: str = Field(..., description="Unique UUID for this analysis session")
+    status: str = Field(..., description="Status: COMPLETED, FAILED, NO_PERSON_DETECTED, INSUFFICIENT_POSE_QUALITY")
+    exerciseId: Optional[Any] = Field(None, description="Exercise identifier (e.g., ID or code)")
+    exercise: str = Field("PLANCHE", description="Normalized exercise name")
+    score: float = Field(..., description="Overall movement quality score [0.0, 100.0]")
+    formAccuracy: float = Field(0.0, description="Form accuracy score [0.0, 100.0]")
+    stability: float = Field(0.0, description="Stability score [0.0, 100.0]")
+    alignment: float = Field(0.0, description="Body alignment score [0.0, 100.0]")
+    metrics: Dict[str, Any] = Field(default_factory=dict, description="Exercise-specific metrics and angles")
+    feedback: List[str] = Field(default_factory=list, description="Actionable mistakes and coaching suggestions")
+    video: VideoOutputMetadata = Field(..., description="Video metadata and availability")
+    keypoints: VideoKeypointsData = Field(..., description="Per-frame 17 COCO keypoint timeline")
+
+

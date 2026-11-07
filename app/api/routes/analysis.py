@@ -1,13 +1,18 @@
 import logging
+import os
 import uuid
 from typing import Any, Dict, Optional
 from fastapi import APIRouter, File, HTTPException, Query, Response, UploadFile, status
+from fastapi.responses import FileResponse
 
 from app.schemas.analysis import (
     ImageAnalysisResponse,
     VideoAnalysisResponse,
+    VideoKeypointsData,
+    VideoScoringResponse,
 )
 from app.services.analyzer import CalisthenicsAnalyzerService
+from app.services.video_pipeline import video_scoring_pipeline
 from app.core.logging_context import set_request_id, get_request_id
 from app.exercises.registry import exercise_registry
 
@@ -202,6 +207,112 @@ async def analyze_video(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to process video analysis: {str(e)}"
         )
+
+
+@router.post(
+    "/video/score",
+    response_model=VideoScoringResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Full video scoring with frame-by-frame 17 COCO keypoints and annotated MP4 generation",
+    description="Analyzes uploaded video, calculates biomechanical metrics and form score, generates annotated MP4 skeleton overlay, and returns keypoints."
+)
+async def score_video(
+    file: UploadFile = File(..., description="Video file (MP4, MOV, AVI)"),
+    exercise_id: Optional[str] = Query(None, description="Exercise ID"),
+    exercise: Optional[str] = Query(None, description="Exercise name or code (e.g. PLANCHE, FRONT_LEVER, PULL_UP)"),
+    progression: Optional[str] = Query(None, description="Progression level"),
+    sample_fps: int = Query(10, ge=1, le=30, description="Sampling rate in frames per second"),
+    confidence_threshold: float = Query(0.25, ge=0.0, le=1.0, description="Keypoint confidence threshold"),
+    side_view: bool = Query(False, description="Whether camera is positioned side-on"),
+    analysis_id: Optional[str] = Query(None, description="Optional caller analysis UUID")
+) -> VideoScoringResponse:
+    if not file.content_type or not (file.content_type.startswith("video/") or file.filename.endswith((".mp4", ".mov", ".avi", ".mkv"))):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File provided is not a supported video format."
+        )
+
+    try:
+        content = await file.read()
+        if len(content) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Empty video file uploaded."
+            )
+
+        chosen_exercise = exercise or progression or "PLANCHE"
+        response = video_scoring_pipeline.process_video(
+            video_bytes=content,
+            exercise_name=chosen_exercise,
+            exercise_id=exercise_id,
+            sample_fps=sample_fps,
+            confidence_threshold=confidence_threshold,
+            side_view=side_view,
+            analysis_id=analysis_id
+        )
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error during video scoring endpoint: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to process video scoring: {str(e)}"
+        )
+
+
+@router.get(
+    "/video/{analysis_id}/annotated",
+    response_class=FileResponse,
+    summary="Download or stream the annotated skeleton video for an analysis session",
+    description="Streams the generated H.264 MP4 video containing the visual skeleton and keypoints overlay."
+)
+async def get_annotated_video(analysis_id: str):
+    video_path = video_scoring_pipeline.get_annotated_video_path(analysis_id)
+    if not video_path or not os.path.exists(video_path):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Annotated video not found for analysis {analysis_id}"
+        )
+    return FileResponse(
+        path=video_path,
+        media_type="video/mp4",
+        filename=f"annotated_{analysis_id}.mp4"
+    )
+
+
+@router.get(
+    "/video/{analysis_id}/keypoints",
+    response_model=VideoKeypointsData,
+    summary="Retrieve full 17 COCO keypoint timeline data for an analysis session",
+    description="Returns frame-by-frame normalized keypoint coordinates for timeline visualization."
+)
+async def get_video_keypoints(analysis_id: str) -> VideoKeypointsData:
+    cached = video_scoring_pipeline.get_cached_analysis(analysis_id)
+    if not cached:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Analysis session not found for id {analysis_id}"
+        )
+    return cached.keypoints
+
+
+@router.get(
+    "/video/{analysis_id}",
+    response_model=VideoScoringResponse,
+    summary="Retrieve complete analysis result by ID",
+    description="Returns scoring metrics, feedback, and video metadata."
+)
+async def get_video_analysis(analysis_id: str) -> VideoScoringResponse:
+    cached = video_scoring_pipeline.get_cached_analysis(analysis_id)
+    if not cached:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Analysis session not found for id {analysis_id}"
+        )
+    return cached
+
 
 
 @router.get(
