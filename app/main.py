@@ -5,10 +5,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.routes.analysis import router as analysis_router
+from app.api.routes.live_analysis import router as live_analysis_router
 from app.core.config import settings
 
+log_level = getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO)
 logging.basicConfig(
-    level=logging.INFO,
+    level=log_level,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
@@ -17,7 +19,19 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifecycle context manager."""
-    logger.info(f"Starting {settings.PROJECT_NAME} v{settings.VERSION}...")
+    logger.info(f"Starting {settings.PROJECT_NAME} v{settings.VERSION} on device '{settings.DEVICE}'...")
+    try:
+        from app.services.live_pipeline import live_pipeline
+        # Warm-up model on startup so first live frame does not incur initialization delay
+        if live_pipeline.pose_estimator.model is not None:
+            logger.info("Pre-warming YOLO-Pose inference engine...")
+            import numpy as np
+            dummy_frame = np.zeros((256, 256, 3), dtype=np.uint8)
+            live_pipeline.pose_estimator.estimate_pose(dummy_frame)
+            logger.info("YOLO-Pose model warm-up completed successfully.")
+    except Exception as e:
+        logger.error(f"Failed during model warm-up: {e}", exc_info=True)
+
     yield
     logger.info(f"Shutting down {settings.PROJECT_NAME}...")
 
@@ -44,6 +58,7 @@ if settings.CORS_ORIGINS:
 
 # Register API Routers
 app.include_router(analysis_router, prefix=settings.API_V1_STR)
+app.include_router(live_analysis_router, prefix=settings.API_V1_STR)
 
 
 @app.get(

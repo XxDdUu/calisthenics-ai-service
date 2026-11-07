@@ -1,4 +1,5 @@
 import logging
+import uuid
 from typing import Any, Dict, Optional
 from fastapi import APIRouter, File, HTTPException, Query, Response, UploadFile, status
 
@@ -7,6 +8,8 @@ from app.schemas.analysis import (
     VideoAnalysisResponse,
 )
 from app.services.analyzer import CalisthenicsAnalyzerService
+from app.core.logging_context import set_request_id, get_request_id
+from app.exercises.registry import exercise_registry
 
 logger = logging.getLogger(__name__)
 
@@ -102,8 +105,12 @@ async def export_draw_skeleton(
             detail="File provided is not a valid image."
         )
 
+    request_id = str(uuid.uuid4())[:8]
+    set_request_id(request_id)
     try:
         content = await file.read()
+        logger.debug("[DRAW_SKELETON] request_id=%s upload_bytes=%d", request_id, len(content))
+
         if len(content) == 0:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -111,11 +118,18 @@ async def export_draw_skeleton(
             )
 
         chosen_progression = progression or target_progression
+        logger.info(
+            "[DRAW_SKELETON] request_id=%s progression=%s side_view=%s filename=%s content_type=%s",
+            request_id, chosen_progression, side_view,
+            getattr(file, "filename", "unknown"), file.content_type
+        )
         jpeg_bytes, _ = analyzer_service.export_annotated_image(
             image_bytes=content,
             target_progression=chosen_progression,
-            side_view=side_view
+            side_view=side_view,
+            request_id=request_id
         )
+        logger.info("[DRAW_SKELETON] request_id=%s response_bytes=%d status=ok", request_id, len(jpeg_bytes))
         return Response(
             content=jpeg_bytes,
             media_type="image/jpeg",
@@ -125,7 +139,7 @@ async def export_draw_skeleton(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error during export draw skeleton endpoint: {e}", exc_info=True)
+        logger.error("[DRAW_SKELETON] request_id=%s error=%s", request_id, e, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to export annotated skeleton image: {str(e)}"
@@ -250,6 +264,46 @@ async def list_exercises() -> Dict[str, Any]:
                         }
                     }
                 ]
+            },
+            {
+                "id": "front_lever",
+                "name": "Front Lever",
+                "progressions": [
+                    {"id": "tuck_front_lever", "name": "Tuck Front Lever", "target_criteria": {"elbow_extension": ">= 170°", "hip_angle": "<= 100°"}},
+                    {"id": "adv_tuck_front_lever", "name": "Advanced Tuck Front Lever", "target_criteria": {"elbow_extension": ">= 170°", "hip_angle": "90°–130°"}},
+                    {"id": "straddle_front_lever", "name": "Straddle Front Lever", "target_criteria": {"elbow_extension": ">= 170°", "hip_angle": ">= 160°", "leg_spread": ">= 1.25"}},
+                    {"id": "full_front_lever", "name": "Full Front Lever", "target_criteria": {"elbow_extension": ">= 170°", "hip_angle": ">= 165°", "knee_angle": ">= 165°"}}
+                ]
+            },
+            {
+                "id": "handstand",
+                "name": "Handstand & Handstand Push-up",
+                "progressions": [
+                    {"id": "handstand", "name": "Handstand Hold", "target_criteria": {"elbow_extension": ">= 170°", "shoulder_angle": ">= 165°", "body_line": ">= 168°"}},
+                    {"id": "handstand_pushup", "name": "Handstand Push-up", "target_criteria": {"depth_elbow": "<= 95°", "lockout_elbow": ">= 168°"}}
+                ]
+            },
+            {
+                "id": "pull_up",
+                "name": "Pull-Up",
+                "progressions": [
+                    {"id": "pull_up", "name": "Strict Pull-Up", "target_criteria": {"dead_hang_elbow": ">= 160°", "top_chin_clearance_elbow": "<= 65°", "symmetry": "<= 15° difference"}}
+                ]
+            },
+            {
+                "id": "dips",
+                "name": "Parallel Bar Dips",
+                "progressions": [
+                    {"id": "dips", "name": "Parallel Bar Dips", "target_criteria": {"depth_elbow": "<= 90°", "top_lockout_elbow": ">= 165°"}}
+                ]
+            },
+            {
+                "id": "muscle_up",
+                "name": "Muscle-Up",
+                "progressions": [
+                    {"id": "muscle_up", "name": "Bar Muscle-Up", "target_criteria": {"transition_symmetry": "Simultaneous elbow transition (no chicken wing)", "dip_lockout": ">= 165°"}}
+                ]
             }
-        ]
+        ],
+        "all_catalog": exercise_registry.list_supported_exercises()
     }

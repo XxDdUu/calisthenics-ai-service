@@ -4,7 +4,7 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-green.svg)](https://fastapi.tiangolo.com/)
 [![YOLO-Pose](https://img.shields.io/badge/Ultralytics-YOLO--Pose-orange.svg)](https://docs.ultralytics.com/)
 
-A production-ready FastAPI microservice for computer vision pose estimation, biomechanical angle tracking, and exercise form analysis for calisthenics skills (with dedicated support for **Planche** progressions: Tuck, Advanced Tuck, Straddle, and Full Planche).
+A production-ready FastAPI microservice for computer vision pose estimation, biomechanical angle tracking, and exercise form analysis for calisthenics skills (with real-time Live Analysis and dedicated analyzers for **Planche**, **Front Lever**, **Handstand / HSPU**, **Pull-Up**, **Parallel Bar Dips**, and **Muscle-Up**).
 
 ---
 
@@ -16,23 +16,41 @@ calisthenics-ai-service/
 │   ├── main.py                   # FastAPI application initialization & routes registration
 │   ├── api/
 │   │   └── routes/
-│   │       └── analysis.py       # REST API endpoints for image/video pose analysis
+│   │       ├── analysis.py       # REST API endpoints for image/video pose analysis
+│   │       └── live_analysis.py  # Real-time Live Analysis REST & WebSocket endpoints
 │   ├── core/
-│   │   └── config.py             # Pydantic environment configuration & settings
+│   │   ├── config.py             # Pydantic environment configuration & settings
+│   │   └── logging_context.py    # Request ID tracking context manager
 │   ├── schemas/
-│   │   └── analysis.py           # Pydantic request/response models & schemas
+│   │   └── analysis.py           # Pydantic request/response models & live schemas
 │   ├── pose/
 │   │   └── yolo_pose.py          # Ultralytics YOLO-Pose keypoint detector & skeleton drawing
 │   ├── biomechanics/
-│   │   ├── angles.py             # 2D/3D joint angle vector geometry calculations
+│   │   ├── angles.py             # 2D joint angle vector geometry calculations
 │   │   ├── alignment.py          # Body line, center of mass, & scapular alignment metrics
+│   │   ├── confidence.py         # Keypoint confidence & pose visibility validation
+│   │   ├── smoothing.py          # Temporal EMA filter suppressing live detector jitter
+│   │   ├── hold_detection.py     # Isometric hold tracking state machine
+│   │   ├── side_view.py          # Profile view occlusion handling and midpoint derivation
 │   │   └── metrics.py            # Biomechanics profile evaluator orchestrator
 │   ├── exercises/
-│   │   └── planche.py            # Planche biomechanics, form scoring & coaching cues
+│   │   ├── base.py               # Abstract BaseExerciseAnalyzer
+│   │   ├── planche.py            # Planche biomechanics, form scoring & coaching cues
+│   │   ├── front_lever.py        # Front Lever biomechanics & progression evaluation
+│   │   ├── handstand.py          # Handstand & HSPU alignment and repetition counting
+│   │   ├── pull_up.py            # Pull-up ROM & bilateral arm symmetry tracking
+│   │   ├── dips.py               # Parallel Bar Dips depth & lockout rep analysis
+│   │   ├── muscle_up.py          # Muscle-up transition & chicken-wing detection
+│   │   └── registry.py           # Central exercise analyzer registry
 │   └── services/
-│       └── analyzer.py           # High-level image and video processing pipeline
-├── tests/                        # Comprehensive PyTest unit & integration tests
+│       ├── analyzer.py           # High-level image and video processing pipeline
+│       ├── live_pipeline.py      # Production Live Analysis frame processing pipeline
+│       └── live_session.py       # Thread-safe session manager & temporal smoothing state
+├── tests/                        # Comprehensive PyTest unit, API & integration tests
 │   ├── test_angles.py
+│   ├── test_exercise_analyzers.py
+│   ├── test_live_session.py
+│   ├── test_live_api.py
 │   ├── test_alignment.py
 │   ├── test_planche.py
 │   └── test_api.py
@@ -143,14 +161,85 @@ pytest tests/ -v
 }
 ```
 
-### 2. Single Image Pose & Form Analysis
+### 2. Live Camera Analysis (Frame-by-Frame REST)
+`POST /api/v1/analysis/live/frame`
+
+- **Content-Type**: `multipart/form-data`
+- **Form Data**:
+  - `file`: Camera frame JPEG/PNG
+  - `exercise`: e.g. `FULL_PLANCHE`, `FRONT_LEVER`, `HANDSTAND`, `PULL_UP`, `DIPS`, `MUSCLE_UP`
+  - `session_id`: Optional session ID for temporal smoothing & hold tracking
+  - `draw_overlay`: `false` (or `true` for base64 annotated image)
+  - `debug`: `false`
+
+Also available via JSON Base64: `POST /api/v1/analysis/live/frame-json` with body:
+```json
+{
+  "imageBase64": "...",
+  "exercise": "FULL_PLANCHE",
+  "sessionId": "optional-session-id",
+  "frameSequence": 1,
+  "timestampMs": 1700000000000
+}
+```
+
+### 3. Live WebSocket Streaming
+`WebSocket /api/v1/analysis/live/ws`
+
+Bidirectional streaming for continuous real-time camera processing.
+- Connect: `ws://<HOST>:8000/api/v1/analysis/live/ws`
+- Send frame message:
+```json
+{
+  "action": "frame",
+  "image_base64": "...",
+  "exercise": "FRONT_LEVER",
+  "frame_sequence": 1
+}
+```
+- Immediate Response:
+```json
+{
+  "status": "VALID",
+  "exercise": "FRONT_LEVER",
+  "timestamp": 1700000000000,
+  "frameSequence": 1,
+  "poseDetected": true,
+  "confidence": 0.94,
+  "score": 88.5,
+  "isValidHold": true,
+  "holdDurationSec": 2.4,
+  "measurements": {
+    "elbow_angle": 174.0,
+    "shoulder_angle": 76.0,
+    "body_line_angle": 175.0,
+    "knee_angle": 176.0,
+    "horizontal_tilt": 8.0
+  },
+  "feedback": [
+    {
+      "code": "GOOD_FORM",
+      "message": "Solid Front Lever hold! Maintain body tension.",
+      "severity": "INFO"
+    }
+  ],
+  "timing": {
+    "preprocessing_ms": 1.1,
+    "inference_ms": 28.4,
+    "analysis_ms": 0.5,
+    "total_ms": 30.0
+  }
+}
+```
+
+### 4. Single Image Pose & Form Analysis
 `POST /api/v1/analysis/image`
 
 - **Content-Type**: `multipart/form-data`
 - **Query Params**: `draw_overlay=true`
 - **Form Data**: `file` (Image file)
 
-### 3. Video Hold Duration & Timeline Analysis
+### 5. Video Hold Duration & Timeline Analysis
 `POST /api/v1/analysis/video`
 
 - **Content-Type**: `multipart/form-data`

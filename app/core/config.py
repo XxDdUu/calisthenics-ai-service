@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     MIN_HOLD_DURATION_SEC: float = float(os.getenv("MIN_HOLD_DURATION_SEC", "0.5"))
     HOLD_STABILITY_VARIANCE_THRESHOLD: float = float(os.getenv("HOLD_STABILITY_VARIANCE_THRESHOLD", "15.0"))
     
+    # Logging Configuration
+    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+    
     # Storage & Outputs
     TEMP_DIR: str = os.getenv("TEMP_DIR", "/tmp/calisthenics_ai")
     MAX_UPLOAD_SIZE_MB: int = 50

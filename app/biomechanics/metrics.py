@@ -1,3 +1,5 @@
+import logging
+import time
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
@@ -8,7 +10,10 @@ from app.biomechanics.side_view import (
     SideViewBiomechanicalFeatures,
     SideViewKeypointProcessor,
 )
+from app.core.logging_context import get_request_id
 from app.schemas.analysis import AlignmentMetrics, JointAngles, KeypointData, PoseKeypoints
+
+logger = logging.getLogger(__name__)
 
 
 class BiomechanicsProfile(BaseModel):
@@ -17,6 +22,7 @@ class BiomechanicsProfile(BaseModel):
     side_view: bool = False
     side_view_features: Optional[SideViewBiomechanicalFeatures] = None
     midpoints: Optional[Dict[str, KeypointData]] = None
+    resolved_landmarks: Optional[Dict[str, KeypointData]] = None
     pose_quality_ok: bool = True
     missing_landmarks: List[str] = Field(default_factory=list)
 
@@ -32,6 +38,8 @@ class BiomechanicsEvaluator:
         if pose_kp is None or not pose_kp.keypoints:
             return None
 
+        rid = get_request_id()
+        _t_eval_start = time.perf_counter()
         keypoints = pose_kp.keypoints
 
         # 1. Pose Quality & Visibility Check
@@ -100,15 +108,19 @@ class BiomechanicsEvaluator:
                 body_tilt_deg=joint_angles.body_horizontal_tilt_deg
             )
 
-            return BiomechanicsProfile(
+            profile = BiomechanicsProfile(
                 joint_angles=joint_angles,
                 alignment=alignment,
                 side_view=True,
                 side_view_features=side_features,
                 midpoints=processed_side.midpoints,
+                resolved_landmarks=processed_side.resolved_chain,
                 pose_quality_ok=quality_ok and processed_side.is_valid_side_view,
                 missing_landmarks=missing_parts + processed_side.missing_landmarks
             )
+            t_eval_ms = (time.perf_counter() - _t_eval_start) * 1000.0
+            logger.debug("[TIMING] request_id=%s stage=biomechanics_evaluation duration_ms=%.2f side_view=True", rid, t_eval_ms)
+            return profile
 
         else:
             # --- STANDARD PROCESSING PIPELINE ---
@@ -120,7 +132,7 @@ class BiomechanicsEvaluator:
                 body_tilt_deg=joint_angles.body_horizontal_tilt_deg
             )
 
-            return BiomechanicsProfile(
+            profile = BiomechanicsProfile(
                 joint_angles=joint_angles,
                 alignment=alignment,
                 side_view=False,
@@ -129,3 +141,6 @@ class BiomechanicsEvaluator:
                 pose_quality_ok=quality_ok,
                 missing_landmarks=missing_parts
             )
+            t_eval_ms = (time.perf_counter() - _t_eval_start) * 1000.0
+            logger.debug("[TIMING] request_id=%s stage=biomechanics_evaluation duration_ms=%.2f side_view=False", rid, t_eval_ms)
+            return profile

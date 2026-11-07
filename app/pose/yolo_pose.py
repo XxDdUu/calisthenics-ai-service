@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
@@ -7,6 +8,7 @@ from app.utils.pose_refinement import refine_wrists
 from app.biomechanics.side_view import resolve_side_view_chain
 
 from app.core.config import settings
+from app.core.logging_context import get_request_id
 from app.schemas.analysis import KeypointData, PlancheAnalysisResult, PoseKeypoints
 
 logger = logging.getLogger(__name__)
@@ -84,6 +86,7 @@ class YOLOPoseEstimator:
 
     def __init__(self, model_path: Optional[str] = None, device: Optional[str] = None):
         self.model_path = model_path or settings.MODEL_PATH
+        self.resolved_model_path = _resolve_model_path(self.model_path)
         self.device = device or settings.DEVICE
         self.conf_threshold = settings.CONFIDENCE_THRESHOLD
         self.keypoint_conf_threshold = settings.KEYPOINT_CONF_THRESHOLD
@@ -92,7 +95,7 @@ class YOLOPoseEstimator:
 
     def _init_model(self):
         """Initialize YOLO model and verify it is a pose estimation model."""
-        resolved_path = _resolve_model_path(self.model_path)
+        resolved_path = self.resolved_model_path
         logger.info(f"Loading YOLO-Pose model from '{resolved_path}' on device '{self.device}'...")
         try:
             from ultralytics import YOLO
@@ -107,12 +110,89 @@ class YOLOPoseEstimator:
                 self.model = None
                 raise ValueError(err_msg)
 
+            add_callback = getattr(model, "add_callback", None)
+            if callable(add_callback):
+                add_callback("on_predict_start", self._install_preprocess_trace)
+
             self.model = model
             logger.info(f"Successfully loaded YOLO-Pose model (task='{task}') from '{resolved_path}'")
         except Exception as e:
             logger.error(f"Failed to load YOLO-Pose model from '{resolved_path}': {e}", exc_info=True)
             self.model = None
             raise RuntimeError(f"YOLO-Pose model initialization failed for '{resolved_path}': {str(e)}") from e
+
+    def _install_preprocess_trace(self, predictor) -> None:
+        """Log the actual letterboxed tensor geometry without changing its pixels."""
+        if getattr(predictor, "_pose_preprocess_trace_installed", False):
+            return
+
+        preprocess = predictor.preprocess
+
+        def traced_preprocess(images):
+            model_input = preprocess(images)
+            batch = getattr(predictor, "batch", None)
+            original_images = batch[1] if batch is not None and len(batch) > 1 else ()
+            input_h, input_w = model_input.shape[-2:]
+            rid = get_request_id()
+
+            for image_index, original in enumerate(original_images):
+                original_h, original_w = original.shape[:2]
+                scale = min(input_h / original_h, input_w / original_w)
+                resized_w = round(original_w * scale)
+                resized_h = round(original_h * scale)
+                pad_x = input_w - resized_w
+                pad_y = input_h - resized_h
+                pad_left = round(pad_x / 2.0 - 0.1)
+                pad_top = round(pad_y / 2.0 - 0.1)
+                logger.info(
+                    "[YOLO] request_id=%s stage=model_preprocess image_index=%d "
+                    "original_shape=%dx%d resized_shape=%dx%d model_input_shape=%dx%d "
+                    "scale=%.6f padding_left=%d padding_top=%d padding_right=%d padding_bottom=%d",
+                    rid, image_index, original_w, original_h, resized_w, resized_h,
+                    input_w, input_h, scale, pad_left, pad_top,
+                    pad_x - pad_left, pad_y - pad_top
+                )
+            return model_input
+
+        predictor.preprocess = traced_preprocess
+        predictor._pose_preprocess_trace_installed = True
+
+        construct_result = getattr(predictor, "construct_result", None)
+        keypoint_shape = getattr(getattr(predictor, "model", None), "kpt_shape", None)
+        if callable(construct_result) and keypoint_shape and not getattr(predictor, "_pose_coordinate_trace_installed", False):
+            def traced_construct_result(pred, img, orig_img, img_path, *args, **kwargs):
+                raw_keypoints = pred[:, 6:].reshape((pred.shape[0], *keypoint_shape))
+                for person_index, person_keypoints in enumerate(raw_keypoints):
+                    for keypoint_index in (7, 8, 13, 14):
+                        point = person_keypoints[keypoint_index]
+                        confidence = float(point[2]) if point.shape[0] >= 3 else None
+                        logger.info(
+                            "[KEYPOINT_TRACE] request_id=%s stage=model_output_before_scale "
+                            "person=%d joint=%s idx=%d x=%.2f y=%.2f conf=%s "
+                            "coord_space=model_input_pixels",
+                            get_request_id(), person_index, COCO_KEYPOINTS[keypoint_index],
+                            keypoint_index, float(point[0]), float(point[1]),
+                            f"{confidence:.4f}" if confidence is not None else "unavailable"
+                        )
+
+                result = construct_result(pred, img, orig_img, img_path, *args, **kwargs)
+                scaled_keypoints = result.keypoints.data
+                for person_index, person_keypoints in enumerate(scaled_keypoints):
+                    for keypoint_index in (7, 8, 13, 14):
+                        point = person_keypoints[keypoint_index]
+                        confidence = float(point[2]) if point.shape[0] >= 3 else None
+                        logger.info(
+                            "[KEYPOINT_TRACE] request_id=%s stage=ultralytics_scaled_to_original "
+                            "person=%d joint=%s idx=%d x=%.2f y=%.2f conf=%s "
+                            "coord_space=original_image_pixels",
+                            get_request_id(), person_index, COCO_KEYPOINTS[keypoint_index],
+                            keypoint_index, float(point[0]), float(point[1]),
+                            f"{confidence:.4f}" if confidence is not None else "unavailable"
+                        )
+                return result
+
+            predictor.construct_result = traced_construct_result
+            predictor._pose_coordinate_trace_installed = True
 
     def estimate_pose(self, image_np: np.ndarray) -> Tuple[bool, Optional[PoseKeypoints]]:
         """
@@ -127,21 +207,48 @@ class YOLOPoseEstimator:
             logger.error("YOLO model is not initialized.")
             return False, None
 
+        rid = get_request_id()
+        img_h, img_w = image_np.shape[:2]
+
         try:
+            _t0 = time.perf_counter()
             results = self.model(
                 image_np,
                 conf=self.conf_threshold,
                 device=self.device,
                 verbose=False
             )
+            t_inference_ms = (time.perf_counter() - _t0) * 1000.0
+            logger.debug("[TIMING] request_id=%s stage=yolo_inference duration_ms=%.2f", rid, t_inference_ms)
+            logger.debug("[YOLO] request_id=%s inference_ms=%.1f image_shape=%dx%d", rid, t_inference_ms, img_w, img_h)
 
             if results is None or len(results) == 0:
-                logger.info("YOLO inference returned no results object.")
+                logger.info("[YOLO] request_id=%s inference returned no results object.", rid)
                 return False, None
 
             res = results[0]
             boxes = getattr(res, "boxes", None)
             keypoints = getattr(res, "keypoints", None)
+            predictor = getattr(self.model, "predictor", None)
+            predictor_args = getattr(predictor, "args", None)
+            result_orig_shape = getattr(res, "orig_shape", None)
+            keypoint_orig_shape = getattr(keypoints, "orig_shape", None)
+            keypoint_output_shape = getattr(getattr(keypoints, "data", None), "shape", None)
+            logger.info(
+                "[YOLO] request_id=%s model=%s weights=%s source_shape=%s result_orig_shape=%s "
+                "keypoint_orig_shape=%s keypoint_output_shape=%s imgsz=%s rect=%s stride=%s "
+                "coordinate_space=original_image_pixels",
+                rid,
+                type(self.model).__name__,
+                getattr(self, "resolved_model_path", getattr(self, "model_path", "unknown")),
+                tuple(image_np.shape),
+                result_orig_shape,
+                keypoint_orig_shape,
+                tuple(keypoint_output_shape) if keypoint_output_shape is not None else None,
+                getattr(predictor_args, "imgsz", None),
+                getattr(predictor_args, "rect", None),
+                getattr(getattr(predictor, "model", None), "stride", None),
+            )
 
             num_boxes = len(boxes) if boxes is not None else 0
             has_keypoints = (
@@ -149,45 +256,93 @@ class YOLOPoseEstimator:
                 if keypoints is not None and getattr(keypoints, "data", None) is not None and len(keypoints.data) > 0
                 else "no"
             )
-            logger.debug(f"YOLO inference: boxes={num_boxes}, keypoints={has_keypoints}")
+            logger.debug("[YOLO] request_id=%s inference boxes=%d keypoints=%s", rid, num_boxes, has_keypoints)
 
             if boxes is None or len(boxes) == 0:
-                logger.info("YOLO inference: no bounding boxes detected.")
+                logger.info("[YOLO] request_id=%s no bounding boxes detected.", rid)
                 return False, None
 
             if keypoints is None or getattr(keypoints, "data", None) is None or len(keypoints.data) == 0:
-                logger.info("YOLO inference: boxes detected, but keypoints data is empty.")
+                logger.info("[YOLO] request_id=%s boxes detected, but keypoints data is empty.", rid)
                 return False, None
 
             conf_tensor = getattr(boxes, "conf", None)
             if conf_tensor is None or len(conf_tensor) == 0:
-                logger.warning("Bounding boxes missing confidence tensor.")
+                logger.warning("[YOLO] request_id=%s bounding boxes missing confidence tensor.", rid)
                 return False, None
 
+            _t_kp_start = time.perf_counter()
             confs = conf_tensor.cpu().numpy()
             best_idx = int(np.argmax(confs))
             best_conf = float(confs[best_idx])
+            logger.debug("[YOLO] request_id=%s selected_person idx=%d detection_conf=%.4f num_people=%d image_ref=%dx%d",
+                         rid, best_idx, best_conf, len(confs), img_w, img_h)
 
             kp_data_tensor = keypoints.data
             if best_idx >= len(kp_data_tensor):
-                logger.warning(f"Selected index {best_idx} out of bounds for keypoints data of length {len(kp_data_tensor)}.")
+                logger.warning("[YOLO] request_id=%s selected index %d out of bounds for keypoints length %d.",
+                               rid, best_idx, len(kp_data_tensor))
                 return False, None
 
-            kp_array = kp_data_tensor[best_idx].cpu().numpy()
-            kp_array = refine_wrists(kp_array)
+            kp_raw_tensor = kp_data_tensor[best_idx].cpu().numpy()
+            kp_raw = np.copy(kp_raw_tensor)
+
+            # Log raw YOLO model output for all relevant joints
+            if kp_raw.shape[0] >= 17:
+                for idx, kp_name in enumerate(COCO_KEYPOINTS):
+                    rx, ry = float(kp_raw[idx][0]), float(kp_raw[idx][1])
+                    rc = float(kp_raw[idx][2]) if kp_raw.shape[1] >= 3 else best_conf
+                    if kp_name in (
+                        "left_shoulder", "right_shoulder",
+                        "left_hip", "right_hip",
+                        "left_knee", "right_knee",
+                        "left_ankle", "right_ankle",
+                        "left_elbow", "right_elbow",
+                        "left_wrist", "right_wrist"
+                    ):
+                        log = logger.info if kp_name in (
+                            "left_knee", "right_knee", "left_elbow", "right_elbow"
+                        ) else logger.debug
+                        log(
+                            "[YOLO] request_id=%s stage=ultralytics_postprocessed_output idx=%d name=%s "
+                            "x=%.2f y=%.2f conf=%.4f visible=%s (original_image=%dx%d)",
+                            rid, idx, kp_name, rx, ry, rc, rc >= self.keypoint_conf_threshold, img_w, img_h
+                        )
+
+            kp_array = refine_wrists(kp_raw_tensor)
+            if kp_array.shape[0] >= 17:
+                for idx, kp_name in enumerate(COCO_KEYPOINTS):
+                    if kp_name in (
+                        "left_shoulder", "right_shoulder",
+                        "left_hip", "right_hip",
+                        "left_knee", "right_knee",
+                        "left_ankle", "right_ankle",
+                        "left_elbow", "right_elbow",
+                        "left_wrist", "right_wrist"
+                    ):
+                        jx, jy = float(kp_array[idx][0]), float(kp_array[idx][1])
+                        jc = float(kp_array[idx][2]) if kp_array.shape[1] >= 3 else best_conf
+                        rx, ry = float(kp_raw[idx][0]), float(kp_raw[idx][1])
+                        delta_str = f" delta=(dx={jx-rx:+.2f}, dy={jy-ry:+.2f})" if (abs(jx-rx) > 0.01 or abs(jy-ry) > 0.01) else ""
+                        log = logger.info if kp_name in (
+                            "left_knee", "right_knee", "left_elbow", "right_elbow"
+                        ) else logger.debug
+                        log(
+                            "[KEYPOINT_TRACE] request_id=%s stage=post_extraction joint=%s idx=%d "
+                            "x=%.2f y=%.2f conf=%.4f coord_space=original_image_pixels%s",
+                            rid, kp_name, idx, jx, jy, jc, delta_str
+                        )
+
             xyxy_tensor = getattr(boxes, "xyxy", None)
             if xyxy_tensor is None or best_idx >= len(xyxy_tensor):
-                logger.warning("Bounding boxes missing xyxy coordinates.")
+                logger.warning("[YOLO] request_id=%s bounding boxes missing xyxy coordinates.", rid)
                 return False, None
 
             box_tensor = xyxy_tensor[best_idx].cpu().numpy()
 
-            logger.debug(
-                f"Selected person index={best_idx} with confidence={best_conf:.4f}. Keypoint shape={kp_array.shape}"
-            )
-
             if kp_array.ndim != 2 or kp_array.shape[0] < 17:
-                logger.warning(f"Keypoint tensor shape {kp_array.shape} invalid, expected at least (17, 3).")
+                logger.warning("[YOLO] request_id=%s keypoint tensor shape %s invalid, expected at least (17, 3).",
+                               rid, kp_array.shape)
                 return False, None
 
             keypoints_dict: Dict[str, KeypointData] = {}
@@ -205,6 +360,8 @@ class YOLOPoseEstimator:
                 bounding_box=[float(box_tensor[0]), float(box_tensor[1]), float(box_tensor[2]), float(box_tensor[3])],
                 detection_confidence=best_conf
             )
+            t_kp_extract_ms = (time.perf_counter() - _t_kp_start) * 1000.0
+            logger.debug("[TIMING] request_id=%s stage=keypoint_extraction duration_ms=%.2f", rid, t_kp_extract_ms)
             return True, pose_kp
 
         except Exception as e:
@@ -273,39 +430,108 @@ class YOLOPoseEstimator:
         - Face keypoints (nose, eyes, ears) are always suppressed.
         - Midpoint body-line uses occlusion-aware snapping (same as compute_midpoint).
         """
+        _t_render_start = time.perf_counter()
+        rid = get_request_id()
         annotated = image_np.copy()
         if pose_kp is None or not pose_kp.keypoints:
             return annotated
 
         kps = pose_kp.keypoints
         is_side_view = analysis is not None and getattr(analysis, "side_view", False)
+        h_img, w_img = annotated.shape[:2]
+        logger.debug("[RENDER] request_id=%s draw_skeleton image=%dx%d is_side_view=%s", rid, w_img, h_img, is_side_view)
 
         if is_side_view:
-            # Resolve arm and leg independently. A side-view skeleton must not
-            # discard a good leg merely because the opposite arm wins confidence.
-            chain = resolve_side_view_chain(kps, threshold=0.25)
+            # Synchronize skeleton rendering with evaluator inputs.
+            # 1. First preference: use resolved_landmarks from analysis.debug_info
+            chain: Dict[str, KeypointData] = {}
+            if analysis is not None and analysis.debug_info and "resolved_landmarks" in analysis.debug_info:
+                for k, v in analysis.debug_info["resolved_landmarks"].items():
+                    chain[k] = KeypointData(
+                        x=v["x"], y=v["y"], confidence=v["confidence"], name=k, visible=v.get("visible", True)
+                    )
+            # 2. Second preference: check if kps contains resolved_{joint} or side_{joint}
+            if not chain:
+                for joint in ("shoulder", "elbow", "wrist", "hip", "knee", "ankle"):
+                    if f"resolved_{joint}" in kps:
+                        chain[joint] = kps[f"resolved_{joint}"]
+                    elif f"side_{joint}" in kps:
+                        chain[joint] = kps[f"side_{joint}"]
+            # 3. Fallback for legacy calls without analysis / resolved markers
+            if not chain:
+                chain = resolve_side_view_chain(kps, threshold=0.25)
+
+            logger.debug("[RENDER] request_id=%s resolved_chain joints=%s", rid, list(chain.keys()))
+            for jname in ("shoulder", "hip", "knee", "ankle", "elbow", "wrist"):
+                if jname in chain:
+                    jkp = chain[jname]
+                    is_clipped = not (0 <= jkp.x < w_img and 0 <= jkp.y < h_img)
+                    log = logger.info if jname in ("knee", "elbow") else logger.debug
+                    log(
+                        "[KEYPOINT_TRACE] request_id=%s stage=passed_to_rendering joint=%s x=%.2f y=%.2f conf=%.4f visible=%s clipped=%s",
+                        rid, jname, jkp.x, jkp.y, jkp.confidence, jkp.visible, is_clipped
+                    )
+                else:
+                    log = logger.info if jname in ("knee", "elbow") else logger.debug
+                    log(
+                        "[KEYPOINT_TRACE] request_id=%s stage=passed_to_rendering joint=%s status=unresolved",
+                        rid, jname
+                    )
+
             for a, b in (("shoulder", "elbow"), ("elbow", "wrist"),
-                         ("hip", "knee"), ("knee", "ankle")):
+                         ("shoulder", "hip"), ("hip", "knee"), ("knee", "ankle")):
                 kp1, kp2 = chain.get(a), chain.get(b)
                 if kp1 and kp2 and kp1.visible and kp2.visible:
+                    is_clipped = not (0 <= kp1.x < w_img and 0 <= kp1.y < h_img and 0 <= kp2.x < w_img and 0 <= kp2.y < h_img)
+                    if is_clipped:
+                        logger.warning(
+                            "[RENDER] request_id=%s bone_clipped %s->%s coords=(%.1f,%.1f)->(%.1f,%.1f) bounds=%dx%d",
+                            rid, a, b, kp1.x, kp1.y, kp2.x, kp2.y, w_img, h_img
+                        )
+                    logger.debug("[RENDER] request_id=%s bone %s->%s (%.1f,%.1f)->(%.1f,%.1f)", rid, a, b, kp1.x, kp1.y, kp2.x, kp2.y)
                     cv2.line(annotated, (int(kp1.x), int(kp1.y)), (int(kp2.x), int(kp2.y)),
                              (0, 255, 127), 3, cv2.LINE_AA)
+                else:
+                    logger.debug("[RENDER] request_id=%s bone_skipped %s->%s kp1=%s kp2=%s",
+                                 rid, a, b,
+                                 f"({kp1.x:.0f},{kp1.y:.0f}) vis={kp1.visible}" if kp1 else "missing",
+                                 f"({kp2.x:.0f},{kp2.y:.0f}) vis={kp2.visible}" if kp2 else "missing")
             for kp in chain.values():
-                center = (int(kp.x), int(kp.y))
-                cv2.circle(annotated, center, 6, (0, 215, 255), -1, cv2.LINE_AA)
-                cv2.circle(annotated, center, 8, (255, 255, 255), 1, cv2.LINE_AA)
+                if kp and kp.visible:
+                    center = (int(kp.x), int(kp.y))
+                    cv2.circle(annotated, center, 6, (0, 215, 255), -1, cv2.LINE_AA)
+                    cv2.circle(annotated, center, 8, (255, 255, 255), 1, cv2.LINE_AA)
 
-            # The resolved chain is also the rendered body axis, so metrics and
-            # annotations cannot disagree about which ankle/knee was selected.
+            # Midpoints / body-line: synchronize with evaluator midpoints or resolved chain
             mid_pts = {}
-            for name in ("shoulder", "hip", "knee", "ankle"):
-                kp = chain.get(name)
-                if kp:
-                    mid_pts[f"mid_{name}"] = (int(kp.x), int(kp.y))
+            if analysis is not None and analysis.debug_info and "midpoints" in analysis.debug_info:
+                for name, pt_data in analysis.debug_info["midpoints"].items():
+                    if pt_data.get("visible", True):
+                        mid_pts[name] = (int(pt_data["x"]), int(pt_data["y"]))
+            else:
+                for name in ("shoulder", "hip", "knee", "ankle"):
+                    mname = f"mid_{name}"
+                    if mname in kps and kps[mname].visible:
+                        mid_pts[mname] = (int(kps[mname].x), int(kps[mname].y))
+                    elif name in chain and chain[name].visible:
+                        mid_pts[mname] = (int(chain[name].x), int(chain[name].y))
+
+            logger.debug("[RENDER] request_id=%s midpoints drawn=%s", rid, list(mid_pts.keys()))
+            if "mid_knee" in mid_pts:
+                knee_source = kps.get("mid_knee") or chain.get("knee")
+                logger.info(
+                    "[KEYPOINT_TRACE] request_id=%s stage=rendered_midpoint joint=mid_knee "
+                    "x=%d y=%d conf=%s",
+                    rid, mid_pts["mid_knee"][0], mid_pts["mid_knee"][1],
+                    f"{knee_source.confidence:.4f}" if knee_source is not None else "unavailable"
+                )
             for a, b in (("mid_shoulder", "mid_hip"), ("mid_hip", "mid_knee"),
                          ("mid_knee", "mid_ankle")):
                 if a in mid_pts and b in mid_pts:
+                    logger.debug("[RENDER] request_id=%s body_line %s->%s %s->%s", rid, a, b, mid_pts[a], mid_pts[b])
                     cv2.line(annotated, mid_pts[a], mid_pts[b], (255, 255, 0), 4, cv2.LINE_AA)
+                else:
+                    logger.debug("[RENDER] request_id=%s body_line_skipped %s->%s a_in=%s b_in=%s", rid, a, b, a in mid_pts, b in mid_pts)
             for name, pt in mid_pts.items():
                 cv2.circle(annotated, pt, 8, (255, 0, 255), -1, cv2.LINE_AA)
                 cv2.circle(annotated, pt, 11, (255, 255, 255), 2, cv2.LINE_AA)
@@ -336,6 +562,8 @@ class YOLOPoseEstimator:
                 annotated, _legacy_analysis_data(form_score, progression, errors),
                 show_debug_sections=False
             )
+        t_render_ms = (time.perf_counter() - _t_render_start) * 1000.0
+        logger.debug("[TIMING] request_id=%s stage=skeleton_rendering duration_ms=%.2f", rid, t_render_ms)
         return annotated
 
 
@@ -586,4 +814,3 @@ def draw_analysis_panel(image: np.ndarray, analysis, show_debug_sections: bool =
         y = draw_biomechanics_form(image, analysis, x, y + 4, inner_width)
     draw_issues(image, analysis, x, y + 2, inner_width)
     return image
-

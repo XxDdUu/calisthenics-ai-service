@@ -10,6 +10,14 @@ from app.schemas.analysis import (
     VideoFrameAnalysis,
     VideoAnalysisResponse,
     RealtimeStreamResponse,
+    LiveAnalysisStatus,
+    FeedbackSeverity,
+    LiveFeedbackItem,
+    LandmarkItem,
+    LiveTiming,
+    LiveAnalysisResponse,
+    LiveFrameRequest,
+    LiveSessionInfo,
 )
 
 __all__ = [
@@ -23,4 +31,13 @@ __all__ = [
     "ImageAnalysisResponse",
     "VideoFrameAnalysis",
     "VideoAnalysisResponse",
+    "RealtimeStreamResponse",
+    "LiveAnalysisStatus",
+    "FeedbackSeverity",
+    "LiveFeedbackItem",
+    "LandmarkItem",
+    "LiveTiming",
+    "LiveAnalysisResponse",
+    "LiveFrameRequest",
+    "LiveSessionInfo",
 ]

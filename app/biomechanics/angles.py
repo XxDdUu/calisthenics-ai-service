@@ -5,67 +5,180 @@ import numpy as np
 from app.schemas.analysis import KeypointData, JointAngles
 
 
+import math
+from typing import Dict, Tuple, Optional, Any
+import numpy as np
+
+from app.schemas.analysis import KeypointData, JointAngles
+
+
+def is_valid_coord(val: Any) -> bool:
+    """Check if a numeric coordinate value is finite and valid (not NaN or Inf)."""
+    if val is None:
+        return False
+    try:
+        f = float(val)
+        return math.isfinite(f)
+    except (TypeError, ValueError):
+        return False
+
+
+def is_valid_point(pt: Optional[Tuple[Any, ...]]) -> bool:
+    """Check if a point tuple has at least 2 finite coordinates."""
+    if pt is None or len(pt) < 2:
+        return False
+    return is_valid_coord(pt[0]) and is_valid_coord(pt[1])
+
+
 def calculate_angle_2d(
-    p1: Tuple[float, float],
-    vertex: Tuple[float, float],
-    p2: Tuple[float, float]
+    p1: Optional[Tuple[float, float]],
+    vertex: Optional[Tuple[float, float]],
+    p2: Optional[Tuple[float, float]],
+    default_angle: float = 180.0
 ) -> float:
     """
     Calculate 2D interior angle in degrees formed by three points (p1 - vertex - p2).
     Returns angle in range [0.0, 180.0].
+    Safely rejects degenerate vectors, NaN, Infinity, and missing coordinates.
     """
-    v1 = (p1[0] - vertex[0], p1[1] - vertex[1])
-    v2 = (p2[0] - vertex[0], p2[1] - vertex[1])
+    if not is_valid_point(p1) or not is_valid_point(vertex) or not is_valid_point(p2):
+        return default_angle
+
+    assert p1 is not None and vertex is not None and p2 is not None
+
+    v1 = (float(p1[0]) - float(vertex[0]), float(p1[1]) - float(vertex[1]))
+    v2 = (float(p2[0]) - float(vertex[0]), float(p2[1]) - float(vertex[1]))
 
     mag1 = math.hypot(v1[0], v1[1])
     mag2 = math.hypot(v2[0], v2[1])
 
-    if mag1 < 1e-6 or mag2 < 1e-6:
-        return 180.0
+    if mag1 < 1e-6 or mag2 < 1e-6 or not math.isfinite(mag1) or not math.isfinite(mag2):
+        return default_angle
 
     dot = v1[0] * v2[0] + v1[1] * v2[1]
-    cos_angle = max(-1.0, min(1.0, dot / (mag1 * mag2)))
+    if not math.isfinite(dot):
+        return default_angle
+
+    denom = mag1 * mag2
+    if denom < 1e-12:
+        return default_angle
+
+    cos_angle = max(-1.0, min(1.0, dot / denom))
     angle_rad = math.acos(cos_angle)
-    return math.degrees(angle_rad)
+    deg = math.degrees(angle_rad)
+    return round(float(deg), 1)
 
 
 def calculate_vertical_angle(
-    top_pt: Tuple[float, float],
-    bottom_pt: Tuple[float, float]
+    top_pt: Optional[Tuple[float, float]],
+    bottom_pt: Optional[Tuple[float, float]],
+    default_angle: float = 90.0
 ) -> float:
     """
     Calculate deviation angle in degrees relative to vertical plumline.
     0 degrees means perfectly vertical.
     Positive value indicates tilt.
     """
-    dx = top_pt[0] - bottom_pt[0]
-    dy = abs(top_pt[1] - bottom_pt[1])
-    if dy < 1e-6:
-        return 90.0
+    if not is_valid_point(top_pt) or not is_valid_point(bottom_pt):
+        return default_angle
+
+    assert top_pt is not None and bottom_pt is not None
+    dx = float(top_pt[0]) - float(bottom_pt[0])
+    dy = abs(float(top_pt[1]) - float(bottom_pt[1]))
+    if dy < 1e-6 or not math.isfinite(dy):
+        return default_angle
     angle_rad = math.atan2(abs(dx), dy)
-    return math.degrees(angle_rad)
+    deg = math.degrees(angle_rad)
+    return round(float(deg), 1)
 
 
 def calculate_horizontal_angle(
-    p1: Tuple[float, float],
-    p2: Tuple[float, float]
+    p1: Optional[Tuple[float, float]],
+    p2: Optional[Tuple[float, float]],
+    default_angle: float = 90.0
 ) -> float:
     """
     Calculate angle in degrees relative to ground horizontal axis.
     0 degrees means perfectly horizontal.
     """
-    dx = abs(p2[0] - p1[0])
-    dy = abs(p2[1] - p1[1])
-    if dx < 1e-6:
-        return 90.0
+    if not is_valid_point(p1) or not is_valid_point(p2):
+        return default_angle
+
+    assert p1 is not None and p2 is not None
+    dx = abs(float(p2[0]) - float(p1[0]))
+    dy = abs(float(p2[1]) - float(p1[1]))
+    if dx < 1e-6 or not math.isfinite(dx):
+        return default_angle
     angle_rad = math.atan2(dy, dx)
-    return math.degrees(angle_rad)
+    deg = math.degrees(angle_rad)
+    return round(float(deg), 1)
+
+
+def calculate_distance_2d(
+    p1: Optional[Tuple[float, float]],
+    p2: Optional[Tuple[float, float]]
+) -> float:
+    """Calculate Euclidean distance between two points, handling invalid values safely."""
+    if not is_valid_point(p1) or not is_valid_point(p2):
+        return 0.0
+    assert p1 is not None and p2 is not None
+    dx = float(p1[0]) - float(p2[0])
+    dy = float(p1[1]) - float(p2[1])
+    dist = math.hypot(dx, dy)
+    return float(dist) if math.isfinite(dist) else 0.0
+
+
+def calculate_body_line_deviation(
+    shoulder: Optional[Tuple[float, float]],
+    hip: Optional[Tuple[float, float]],
+    ankle_or_knee: Optional[Tuple[float, float]]
+) -> Tuple[float, str]:
+    """
+    Calculate the body line angle at the hips and classify alignment:
+    - angle: 3-point angle (shoulder - hip - leg_endpoint) [0, 180]
+    - alignment:
+      - 'STRAIGHT' if angle >= 170.0
+      - 'PIKE' if hips are flexed upward relative to the shoulder-leg axis
+      - 'SAG' if hips are dropped downward relative to the shoulder-leg axis
+    """
+    if not is_valid_point(shoulder) or not is_valid_point(hip) or not is_valid_point(ankle_or_knee):
+        return 180.0, "UNKNOWN"
+
+    assert shoulder is not None and hip is not None and ankle_or_knee is not None
+
+    angle = calculate_angle_2d(shoulder, hip, ankle_or_knee)
+
+    if angle >= 170.0:
+        return angle, "STRAIGHT"
+
+    # Cross product (2D determinant) of vector (shoulder -> leg) and vector (shoulder -> hip)
+    # in image space (y grows downward):
+    # dx_line = leg.x - shoulder.x
+    # dy_line = leg.y - shoulder.y
+    # hip deviation = (hip.x - shoulder.x) * dy_line - (hip.y - shoulder.y) * dx_line
+    dx = ankle_or_knee[0] - shoulder[0]
+    dy = ankle_or_knee[1] - shoulder[1]
+    
+    # Midpoint of shoulder and leg
+    mid_x = (shoulder[0] + ankle_or_knee[0]) / 2.0
+    mid_y = (shoulder[1] + ankle_or_knee[1]) / 2.0
+    
+    # In horizontal holds (Planche/Front Lever), if hip.y > mid_y, hips are drooping down (SAG)
+    # If hip.y < mid_y, hips are elevated above body line (PIKE)
+    if hip[1] > mid_y + 10.0:
+        return angle, "SAG"
+    elif hip[1] < mid_y - 10.0:
+        return angle, "PIKE"
+    else:
+        # Cross product sign check for arbitrary orientations
+        cross = (hip[0] - shoulder[0]) * dy - (hip[1] - shoulder[1]) * dx
+        return angle, "PIKE" if cross > 0 else "SAG"
 
 
 def get_point(kp: Optional[KeypointData]) -> Optional[Tuple[float, float]]:
-    """Helper to extract (x, y) tuple if keypoint is visible."""
-    if kp and kp.visible:
-        return (kp.x, kp.y)
+    """Helper to extract (x, y) tuple if keypoint is visible and coordinates are valid."""
+    if kp and kp.visible and is_valid_coord(kp.x) and is_valid_coord(kp.y):
+        return (float(kp.x), float(kp.y))
     return None
 
 

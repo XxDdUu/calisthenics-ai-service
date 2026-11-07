@@ -12,8 +12,12 @@ from app.schemas.analysis import (
     AlignmentMetrics,
     AssessmentStatus,
     ExerciseType,
+    FeedbackSeverity,
     IssueSeverity,
     JointAngles,
+    KeypointData,
+    LiveAnalysisStatus,
+    LiveFeedbackItem,
     MetricEvaluationDetail,
     MetricStatus,
     PlancheAnalysisResult,
@@ -21,11 +25,13 @@ from app.schemas.analysis import (
     StructuredIssue,
     parse_progression_stage,
 )
+from app.exercises.base import BaseExerciseAnalyzer
+from app.biomechanics.angles import compute_all_joint_angles, get_point
 
 logger = logging.getLogger(__name__)
 
 
-class PlancheAnalyzer:
+class PlancheAnalyzer(BaseExerciseAnalyzer):
     """
     Evaluates Planche form against a user-selected target progression stage.
 
@@ -200,11 +206,17 @@ class PlancheAnalyzer:
                 "leg_spread_ratio": leg_spread
             }
         }
-        if is_side_view and profile.midpoints:
-            debug_data["midpoints"] = {
-                k: {"x": v.x, "y": v.y, "confidence": v.confidence}
-                for k, v in profile.midpoints.items()
-            }
+        if is_side_view:
+            if profile.midpoints:
+                debug_data["midpoints"] = {
+                    k: {"x": v.x, "y": v.y, "confidence": v.confidence, "visible": v.visible}
+                    for k, v in profile.midpoints.items()
+                }
+            if profile.resolved_landmarks:
+                debug_data["resolved_landmarks"] = {
+                    k: {"x": v.x, "y": v.y, "confidence": v.confidence, "visible": v.visible}
+                    for k, v in profile.resolved_landmarks.items()
+                }
 
         return PlancheAnalysisResult(
             exercise_type=ExerciseType.PLANCHE,
@@ -600,3 +612,127 @@ class PlancheAnalyzer:
         }
 
         return metrics, issues, errors, positives, cues, component_scores
+
+    @property
+    def name(self) -> str:
+        return "PLANCHE"
+
+    @property
+    def required_landmarks(self) -> List[str]:
+        return [
+            "left_shoulder", "right_shoulder",
+            "left_elbow", "right_elbow",
+            "left_wrist", "right_wrist",
+            "left_hip", "right_hip"
+        ]
+
+    def extract_measurements(
+        self,
+        keypoints: Dict[str, KeypointData],
+        side_view: bool = False
+    ) -> Dict[str, float]:
+        """Extract planche joint angles for live analysis."""
+        angles = compute_all_joint_angles(keypoints)
+        return {
+            "elbow_angle": round(angles.primary_elbow_deg, 1),
+            "shoulder_lean_angle": round(angles.primary_shoulder_lean_deg, 1),
+            "hip_angle": round(angles.hip_angle_deg, 1),
+            "knee_angle": round(angles.primary_knee_deg, 1),
+            "body_line_angle": round(angles.body_horizontal_tilt_deg, 1),
+            "leg_spread_ratio": round(angles.leg_spread_ratio, 2) if angles.leg_spread_ratio is not None else 1.0
+        }
+
+    def evaluate_live_form(
+        self,
+        measurements: Dict[str, float],
+        progression: Optional[str] = None,
+        side_view: bool = False
+    ) -> Tuple[Optional[float], List[LiveFeedbackItem], bool]:
+        """Evaluate planche live measurements against progression rules."""
+        config = get_planche_config(progression or "FULL_PLANCHE")
+        elbow = measurements.get("elbow_angle", 180.0)
+        lean = measurements.get("shoulder_lean_angle", 0.0)
+        hip = measurements.get("hip_angle", 180.0)
+        knee = measurements.get("knee_angle", 180.0)
+        tilt = measurements.get("body_line_angle", 0.0)
+        spread = measurements.get("leg_spread_ratio", 1.0)
+
+        feedback: List[LiveFeedbackItem] = []
+        is_valid_frame = True
+
+        elbow_score, elbow_status = config.elbow_extension.evaluate_score(elbow)
+        lean_score, lean_status = config.shoulder_position.evaluate_score(lean)
+        hip_score, hip_status = config.hip_extension.evaluate_score(hip)
+        knee_score, knee_status = config.knee_extension.evaluate_score(knee)
+        tilt_score, tilt_status = config.body_line.evaluate_score(tilt)
+
+        # Check issues
+        if elbow_status == MetricStatus.FAIL:
+            feedback.append(LiveFeedbackItem(
+                code="EXTEND_ELBOWS",
+                message="Extend elbows fully (>= 170°).",
+                severity=FeedbackSeverity.ERROR
+            ))
+            is_valid_frame = False
+        elif elbow_status == MetricStatus.NEEDS_IMPROVEMENT:
+            feedback.append(LiveFeedbackItem(
+                code="EXTEND_ELBOWS",
+                message="Straighten arms into full lockout.",
+                severity=FeedbackSeverity.WARNING
+            ))
+
+        if lean_status == MetricStatus.FAIL:
+            feedback.append(LiveFeedbackItem(
+                code="LEAN_FORWARD",
+                message="Lean further forward over your wrists.",
+                severity=FeedbackSeverity.ERROR
+            ))
+            is_valid_frame = False
+        elif lean_status == MetricStatus.NEEDS_IMPROVEMENT:
+            feedback.append(LiveFeedbackItem(
+                code="LEAN_FORWARD",
+                message="Increase forward shoulder lean.",
+                severity=FeedbackSeverity.WARNING
+            ))
+
+        if hip_status == MetricStatus.FAIL:
+            feedback.append(LiveFeedbackItem(
+                code="ALIGN_HIPS",
+                message=f"Adjust hips for {config.name}.",
+                severity=FeedbackSeverity.ERROR
+            ))
+            is_valid_frame = False
+        elif hip_status == MetricStatus.NEEDS_IMPROVEMENT:
+            feedback.append(LiveFeedbackItem(
+                code="ALIGN_HIPS",
+                message="Keep hips at proper progression angle.",
+                severity=FeedbackSeverity.WARNING
+            ))
+
+        if tilt_status == MetricStatus.FAIL:
+            feedback.append(LiveFeedbackItem(
+                code="ALIGN_BODY",
+                message="Body line is sagging or too high. Level out with the ground.",
+                severity=FeedbackSeverity.ERROR
+            ))
+            is_valid_frame = False
+
+        # Overall score
+        overall_score = (
+            elbow_score * config.elbow_extension.weight +
+            lean_score * config.shoulder_position.weight +
+            hip_score * config.hip_extension.weight +
+            knee_score * config.knee_extension.weight +
+            tilt_score * config.body_line.weight
+        )
+        overall_score = max(0.0, min(100.0, round(overall_score, 1)))
+
+        if overall_score >= 80.0 and is_valid_frame and not feedback:
+            feedback.append(LiveFeedbackItem(
+                code="GOOD_FORM",
+                message=f"Excellent {config.name} hold! Stay locked.",
+                severity=FeedbackSeverity.INFO
+            ))
+
+        return overall_score, feedback, is_valid_frame
+

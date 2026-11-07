@@ -1,0 +1,62 @@
+{
+  "yolov8n-pose": {
+    "model": "yolov8n-pose",
+    "pose_latency_mean_ms": 58.9826201683339,
+    "pose_latency_p50_ms": 54.97059250001257,
+    "pose_latency_p95_ms": 77.53234820052057,
+    "e2e_latency_mean_ms": 58.98486682834118,
+    "e2e_latency_p95_ms": 77.53398734998882,
+    "avg_cpu_percent": 88.25166666666667,
+    "avg_memory_mb": 438.04632161458335,
+    "max_memory_mb": 455.78125,
+    "mean_confidence": 0.0,
+    "missing_keypoint_rate_pct": 100.0,
+    "mean_positional_jitter_px": 0.0,
+    "elbow_angle_std": 0.0,
+    "shoulder_lean_std": 0.0,
+    "pck_at_0_2": {
+      "shoulder": 0.0,
+      "shoulder_mean_norm_err": 1.0,
+      "elbow": 0.0,
+      "elbow_mean_norm_err": 1.0,
+      "wrist": 0.0,
+      "wrist_mean_norm_err": 1.0,
+      "hip": 0.0,
+      "hip_mean_norm_err": 1.0,
+      "knee": 0.0,
+      "knee_mean_norm_err": 1.0,
+      "ankle": 0.0,
+      "ankle_mean_norm_err": 1.0
+    }
+  },
+  "yolo26n-pose": {
+    "model": "yolo26n-pose",
+    "pose_latency_mean_ms": 61.343627130002766,
+    "pose_latency_p50_ms": 58.028782500059606,
+    "pose_latency_p95_ms": 77.09419914999665,
+    "e2e_latency_mean_ms": 61.34596014165709,
+    "e2e_latency_p95_ms": 77.09623814980654,
+    "avg_cpu_percent": 88.13100000000001,
+    "avg_memory_mb": 475.6719140625,
+    "max_memory_mb": 487.8984375,
+    "mean_confidence": 0.0,
+    "missing_keypoint_rate_pct": 100.0,
+    "mean_positional_jitter_px": 0.0,
+    "elbow_angle_std": 0.0,
+    "shoulder_lean_std": 0.0,
+    "pck_at_0_2": {
+      "shoulder": 0.0,
+      "shoulder_mean_norm_err": 1.0,
+      "elbow": 0.0,
+      "elbow_mean_norm_err": 1.0,
+      "wrist": 0.0,
+      "wrist_mean_norm_err": 1.0,
+      "hip": 0.0,
+      "hip_mean_norm_err": 1.0,
+      "knee": 0.0,
+      "knee_mean_norm_err": 1.0,
+      "ankle": 0.0,
+      "ankle_mean_norm_err": 1.0
+    }
+  }
+}

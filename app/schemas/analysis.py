@@ -10,7 +10,15 @@ class ExerciseType(str, Enum):
     STRADDLE_PLANCHE = "straddle_planche"
     FULL_PLANCHE = "full_planche"
     FRONT_LEVER = "front_lever"
+    FULL_FRONT_LEVER = "full_front_lever"
+    STRADDLE_FRONT_LEVER = "straddle_front_lever"
+    ADV_TUCK_FRONT_LEVER = "adv_tuck_front_lever"
+    TUCK_FRONT_LEVER = "tuck_front_lever"
     HANDSTAND = "handstand"
+    HANDSTAND_PUSHUP = "handstand_pushup"
+    PULL_UP = "pull_up"
+    DIPS = "dips"
+    MUSCLE_UP = "muscle_up"
 
 
 class ProgressionStage(str, Enum):
@@ -162,8 +170,20 @@ class ImageAnalysisResponse(BaseModel):
     annotated_image_base64: Optional[str] = Field(None, description="Base64 encoded JPEG with pose overlay")
 
 
+class VideoMetadata(BaseModel):
+    """Original video file metadata extracted before analysis."""
+    duration_ms: int = Field(..., description="Original video duration in milliseconds")
+    width: int = Field(..., description="Original video frame width in pixels")
+    height: int = Field(..., description="Original video frame height in pixels")
+    original_fps: float = Field(..., description="Original video frames per second (not sampling rate)")
+    total_frames: int = Field(..., description="Total frame count in original video")
+    analyzed_frames: int = Field(..., description="Number of frames actually sampled and analyzed")
+    sampling_fps: float = Field(..., description="Actual analysis sampling rate used (frames per second)")
+    file_size_bytes: int = Field(..., description="Original uploaded video file size in bytes")
+
+
 class VideoFrameAnalysis(BaseModel):
-    frame_index: int = Field(..., description="Frame index")
+    frame_index: int = Field(..., description="Frame index in original video")
     timestamp_sec: float = Field(..., description="Timestamp in seconds")
     pose_detected: bool = Field(..., description="Pose detected in frame")
     form_score: float = Field(..., description="Form score for this frame")
@@ -171,15 +191,36 @@ class VideoFrameAnalysis(BaseModel):
     hold_state: Optional[str] = Field(None, description="Hold state from detector")
     detected_progression: str = Field(..., description="Target progression level in this frame")
     key_issues: List[str] = Field(default_factory=list, description="Errors detected in frame")
+    # Per-frame biomechanical angles (None when pose not detected or landmark missing)
+    elbow_angle: Optional[float] = Field(None, description="Primary elbow extension angle in degrees")
+    shoulder_angle: Optional[float] = Field(None, description="Primary shoulder forward lean angle in degrees")
+    hip_alignment: Optional[float] = Field(None, description="Hip angle (Shoulder-Hip-Knee) in degrees")
+    body_line_deviation: Optional[float] = Field(None, description="Body horizontal tilt deviation from ground in degrees")
+    shoulder_lean: Optional[float] = Field(None, description="Normalized shoulder horizontal displacement over wrists")
+    knee_angle: Optional[float] = Field(None, description="Primary knee extension angle in degrees")
+    pose_confidence: Optional[float] = Field(None, description="Overall pose detection confidence [0.0, 1.0]")
+
+
+class StabilityMetrics(BaseModel):
+    """Stability statistics computed across all analyzed frames with valid pose."""
+    average_body_line_deviation: float = Field(..., description="Mean body-line tilt deviation in degrees")
+    max_body_line_deviation: float = Field(..., description="Maximum body-line tilt deviation in degrees")
+    shoulder_position_variation: float = Field(..., description="Std dev of shoulder lean values across hold frames")
+    hip_position_variation: float = Field(..., description="Std dev of hip alignment values across hold frames")
+    average_pose_confidence: float = Field(..., description="Mean landmark detection confidence across analyzed frames")
+    stability_score: float = Field(..., description="Computed stability score 0–100 (higher = more stable)")
 
 
 class VideoAnalysisResponse(BaseModel):
     success: bool = Field(..., description="Analysis status")
     message: str = Field(..., description="Summary status message")
     processing_time_ms: float = Field(..., description="Total execution time in milliseconds")
-    total_frames: int = Field(..., description="Total video frames processed")
-    fps: float = Field(..., description="Video frames per second")
+    # Legacy fields (kept for backwards compatibility)
+    total_frames: int = Field(..., description="Total video frames in original video")
+    fps: float = Field(..., description="Original video frames per second")
     duration_sec: float = Field(..., description="Total video duration in seconds")
+    # Rich video metadata
+    video_metadata: Optional[VideoMetadata] = Field(None, description="Detailed original video file metadata")
 
     total_hold_duration_sec: float = Field(..., description="Total time planche position was attempted")
     valid_hold_duration_sec: float = Field(..., description="Total time planche was held with valid form (score >= 70)")
@@ -189,8 +230,9 @@ class VideoAnalysisResponse(BaseModel):
     primary_progression: ProgressionStage = Field(..., description="Target progression stage evaluated across video")
     side_view: bool = Field(False, description="Whether video was analyzed in side-view mode")
     component_scores: Optional[Dict[str, float]] = Field(None, description="Aggregated component scores across hold frames")
+    stability: Optional[StabilityMetrics] = Field(None, description="Body stability metrics across analyzed frames")
 
-    timeline: List[VideoFrameAnalysis] = Field(default_factory=list, description="Sampled frame metrics")
+    timeline: List[VideoFrameAnalysis] = Field(default_factory=list, description="Sampled frame metrics with per-frame biomechanics")
     summary_feedback: List[str] = Field(default_factory=list, description="Overall technique strengths and weaknesses")
     key_recommendations: List[str] = Field(default_factory=list, description="Actionable training recommendations")
     debug_info: Optional[Dict[str, Any]] = Field(None, description="Video debug metadata if requested")
@@ -212,3 +254,97 @@ class RealtimeStreamResponse(BaseModel):
     form_errors: List[str] = Field(default_factory=list, description="Real-time detected form errors")
     actionable_cues: List[str] = Field(default_factory=list, description="Instant coaching cues")
     annotated_frame_base64: Optional[str] = Field(None, description="Base64 encoded JPEG overlay frame")
+
+
+class LiveAnalysisStatus(str, Enum):
+    VALID = "VALID"
+    LOW_CONFIDENCE = "LOW_CONFIDENCE"
+    INCOMPLETE_POSE = "INCOMPLETE_POSE"
+    NO_PERSON_DETECTED = "NO_PERSON_DETECTED"
+    INVALID_INPUT = "INVALID_INPUT"
+
+
+class FeedbackSeverity(str, Enum):
+    INFO = "INFO"
+    WARNING = "WARNING"
+    ERROR = "ERROR"
+
+
+class LiveFeedbackItem(BaseModel):
+    code: str = Field(..., description="Stable feedback identifier code")
+    message: str = Field(..., description="Human-readable coaching cue")
+    severity: FeedbackSeverity = Field(FeedbackSeverity.WARNING, description="Severity: INFO, WARNING, ERROR")
+
+
+class LandmarkItem(BaseModel):
+    name: str = Field(..., description="COCO joint landmark name")
+    x: float = Field(..., description="Original image pixel X coordinate")
+    y: float = Field(..., description="Original image pixel Y coordinate")
+    x_norm: float = Field(..., description="Normalized [0.0, 1.0] X coordinate")
+    y_norm: float = Field(..., description="Normalized [0.0, 1.0] Y coordinate")
+    confidence: float = Field(..., description="Detection confidence score [0.0, 1.0]")
+    visible: bool = Field(..., description="True if keypoint confidence meets threshold")
+
+
+class LiveTiming(BaseModel):
+    preprocessing_ms: float = Field(0.0, description="Preprocessing latency in ms")
+    inference_ms: float = Field(0.0, description="YOLO pose inference latency in ms")
+    analysis_ms: float = Field(0.0, description="Biomechanical analysis latency in ms")
+    total_ms: float = Field(0.0, description="Total pipeline latency in ms")
+
+
+class LiveAnalysisResponse(BaseModel):
+    status: LiveAnalysisStatus = Field(..., description="Analysis status: VALID, LOW_CONFIDENCE, INCOMPLETE_POSE, NO_PERSON_DETECTED, INVALID_INPUT")
+    exercise: str = Field(..., description="Evaluated exercise identifier")
+    timestamp: int = Field(0, alias="timestampMs", description="Capture timestamp in milliseconds")
+    frame_sequence: int = Field(0, alias="frameSequence", description="Monotonically increasing frame sequence number")
+    pose_detected: bool = Field(False, alias="poseDetected", description="True if human pose is detected")
+    confidence: float = Field(0.0, description="Overall pose detection confidence [0.0, 1.0]")
+    score: Optional[float] = Field(None, description="Biomechanical form score [0.0, 100.0]")
+    is_valid_hold: bool = Field(False, alias="isValidHold", description="True if form meets valid hold standards")
+    hold_duration_sec: Optional[float] = Field(None, alias="holdDurationSec", description="Continuous valid hold duration in seconds")
+    rep_count: Optional[int] = Field(None, alias="repCount", description="Repetition count for dynamic exercises")
+    rep_phase: Optional[str] = Field(None, alias="repPhase", description="Current repetition phase (e.g., START, INFLECTION, LOCKOUT)")
+    measurements: Dict[str, float] = Field(default_factory=dict, description="Joint angles and alignment measurements")
+    raw_measurements: Optional[Dict[str, float]] = Field(None, alias="rawMeasurements", description="Raw unsmoothed measurements before temporal filter")
+    feedback: List[LiveFeedbackItem] = Field(default_factory=list, description="List of actionable coaching cues")
+    missing_landmarks: List[str] = Field(default_factory=list, alias="missingLandmarks", description="Missing or unreliable landmark names")
+    landmarks: List[LandmarkItem] = Field(default_factory=list, description="Detected keypoints with pixel and normalized coordinates")
+    annotated_frame_base64: Optional[str] = Field(None, alias="annotatedFrameBase64", description="Optional base64 JPEG image with overlay skeleton")
+    timing: Optional[LiveTiming] = Field(None, description="Latency breakdown in milliseconds")
+    session_id: Optional[str] = Field(None, alias="sessionId", description="Associated analysis session ID")
+
+    model_config = {
+        "populate_by_name": True,
+        "arbitrary_types_allowed": True
+    }
+
+
+class LiveFrameRequest(BaseModel):
+    image_base64: Optional[str] = Field(None, alias="imageBase64", description="Base64 encoded JPEG or PNG image frame")
+    exercise: str = Field("FULL_PLANCHE", description="Exercise code (e.g., FULL_PLANCHE, FRONT_LEVER, HANDSTAND)")
+    session_id: Optional[str] = Field(None, alias="sessionId", description="Optional session ID for temporal smoothing")
+    frame_sequence: int = Field(0, alias="frameSequence", description="Frame sequence counter")
+    timestamp_ms: int = Field(0, alias="timestampMs", description="Frame timestamp in ms")
+    side_view: bool = Field(False, alias="sideView", description="True if camera is positioned side-on")
+    draw_overlay: bool = Field(False, alias="drawOverlay", description="Whether to include annotated overlay image in response")
+    debug: bool = Field(False, description="Whether to include raw measurements and debug diagnostics")
+
+    model_config = {
+        "populate_by_name": True
+    }
+
+
+class LiveSessionInfo(BaseModel):
+    session_id: str = Field(..., description="Unique session identifier")
+    exercise: str = Field(..., description="Exercise associated with session")
+    created_at: float = Field(..., description="Session start epoch timestamp")
+    frame_count: int = Field(0, description="Total frames processed in session")
+    peak_score: float = Field(0.0, description="Peak form score recorded")
+    current_hold_duration_sec: float = Field(0.0, description="Current hold duration in seconds")
+    rep_count: int = Field(0, description="Current completed rep count")
+
+    model_config = {
+        "populate_by_name": True
+    }
+

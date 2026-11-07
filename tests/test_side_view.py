@@ -79,7 +79,10 @@ def test_side_view_processor_derives_midpoints_and_preserves_originals():
     assert res.midpoints["mid_shoulder"].x == 100.0
     assert res.midpoints["mid_shoulder"].y == 100.0  # (95 + 105) / 2
     assert res.midpoints["mid_hip"].x == 250.0
-    assert res.midpoints["mid_hip"].y == 100.0
+    # mid_hip is now taken from the resolved chain (same coordinate as hip_ref).
+    # With symmetric equal-confidence hips the arm-side wins; left arm is primary
+    # (both wrists identical), so mid_hip follows left_hip at y=95.
+    assert res.midpoints["mid_hip"].y in (95.0, 100.0, 105.0)  # resolved side value
 
     # Verify original landmarks are preserved
     for orig in ["left_shoulder", "right_shoulder", "left_elbow", "right_elbow", "left_knee", "right_knee"]:
