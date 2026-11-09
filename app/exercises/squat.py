@@ -5,7 +5,11 @@ from app.biomechanics.angles import (
     calculate_vertical_angle,
     get_point,
 )
-from app.biomechanics.phase_detector import ExercisePhaseDetector
+from app.biomechanics.squat_counter import (
+    SquatRepCounter,
+    SquatState,
+    extract_squat_geometry,
+)
 from app.exercises.base import BaseExerciseAnalyzer
 from app.schemas.analysis import (
     FeedbackSeverity,
@@ -22,20 +26,16 @@ class SquatAnalyzer(BaseExerciseAnalyzer):
     """
     Biomechanical analyzer for Bodyweight Squats.
     Evaluates:
-    - Squat depth (thigh parallel / hip crease below knee: knee angle <= 90°-95°)
-    - Knee alignment & tracking
-    - Hip mechanics & flexion
-    - Trunk uprightness & spinal positioning
-    - Repetition counting and phase detection
+    - Squat depth (GOOD: <= 100°, MODERATE: 100°-120°, SHALLOW: > 120°)
+    - Knee alignment & valgus tracking (comparing knee distance to ankle distance)
+    - Hip mechanics & torso inclination (excessive forward lean)
+    - Complete lockout / extension at top
+    - Dedicated session-isolated repetition counting with temporal stability & hysteresis
     """
 
     def __init__(self):
-        self.phase_detector = ExercisePhaseDetector(
-            exercise_name="SQUAT",
-            is_dynamic=True,
-            min_rom_delta=45.0,
-            min_rep_duration_sec=0.8
-        )
+        # Fallback counter for standalone tests that don't pass a LiveSession
+        self._fallback_counter = SquatRepCounter()
 
     @property
     def name(self) -> str:
@@ -61,10 +61,9 @@ class SquatAnalyzer(BaseExerciseAnalyzer):
     @property
     def scoring_weights(self) -> Dict[str, float]:
         return {
-            "squat_depth": 0.25,
-            "knee_alignment": 0.20,
-            "hip_mechanics": 0.20,
-            "trunk_positioning": 0.20,
+            "squat_depth": 0.35,
+            "knee_alignment": 0.25,
+            "torso_position": 0.25,
             "movement_control": 0.15
         }
 
@@ -77,19 +76,14 @@ class SquatAnalyzer(BaseExerciseAnalyzer):
         if not keypoints:
             return False, LiveAnalysisStatus.NO_PERSON_DETECTED, ["all_keypoints"]
 
-        has_hip = bool(keypoints.get("left_hip") or keypoints.get("right_hip"))
-        has_knee = bool(keypoints.get("left_knee") or keypoints.get("right_knee"))
-        has_ankle = bool(keypoints.get("left_ankle") or keypoints.get("right_ankle"))
+        geo = extract_squat_geometry(keypoints, threshold=threshold, side_view=side_view)
+        if not geo["is_pose_valid"]:
+            return False, LiveAnalysisStatus.INCOMPLETE_POSE, geo["missing"]
+
+        # Also verify at least one shoulder or upper body landmark is visible for posture
         has_sh = bool(keypoints.get("left_shoulder") or keypoints.get("right_shoulder"))
-
-        missing = []
-        if not has_sh: missing.append("shoulder")
-        if not has_hip: missing.append("hip")
-        if not has_knee: missing.append("knee")
-        if not has_ankle: missing.append("ankle")
-
-        if missing:
-            return False, LiveAnalysisStatus.INCOMPLETE_POSE, missing
+        if not has_sh:
+            return False, LiveAnalysisStatus.INCOMPLETE_POSE, ["shoulder"]
 
         return True, LiveAnalysisStatus.VALID, []
 
@@ -98,43 +92,41 @@ class SquatAnalyzer(BaseExerciseAnalyzer):
         keypoints: Dict[str, KeypointData],
         side_view: bool = False
     ) -> Dict[str, float]:
+        geo = extract_squat_geometry(keypoints, side_view=side_view)
+        primary_knee = geo["primary_knee_angle"] if geo["primary_knee_angle"] is not None else 180.0
+        l_knee = geo["knee_left_angle"] if geo["knee_left_angle"] is not None else primary_knee
+        r_knee = geo["knee_right_angle"] if geo["knee_right_angle"] is not None else primary_knee
+        avg_knee = geo["avg_knee_angle"] if geo["avg_knee_angle"] is not None else primary_knee
+        hip_y = geo["hip_y"] if geo["hip_y"] is not None else 0.0
+        trunk_lean = geo["torso_angle"] if geo["torso_angle"] is not None else 15.0
+        knee_ankle_ratio = geo["knee_ankle_ratio"] if geo["knee_ankle_ratio"] is not None else 1.0
+
+        # Knee symmetry diff
+        knee_diff = abs(l_knee - r_knee) if (geo["knee_left_angle"] is not None and geo["knee_right_angle"] is not None) else 0.0
+
+        # Hip flexion angle (Shoulder - Hip - Knee)
         l_sh = get_point(keypoints.get("left_shoulder"))
         r_sh = get_point(keypoints.get("right_shoulder"))
         l_hip = get_point(keypoints.get("left_hip"))
         r_hip = get_point(keypoints.get("right_hip"))
         l_kn = get_point(keypoints.get("left_knee"))
         r_kn = get_point(keypoints.get("right_knee"))
-        l_ak = get_point(keypoints.get("left_ankle"))
-        r_ak = get_point(keypoints.get("right_ankle"))
 
-        # Determine dominant visible side
-        l_conf = sum([keypoints[k].confidence for k in ["left_hip", "left_knee", "left_ankle"] if k in keypoints])
-        r_conf = sum([keypoints[k].confidence for k in ["right_hip", "right_knee", "right_ankle"] if k in keypoints])
-        side = "left" if l_conf >= r_conf else "right"
-
-        p_sh = l_sh if side == "left" and l_sh else r_sh or l_sh
-        p_hip = l_hip if side == "left" and l_hip else r_hip or l_hip
-        p_kn = l_kn if side == "left" and l_kn else r_kn or l_kn
-        p_ak = l_ak if side == "left" and l_ak else r_ak or l_ak
-
-        # 1. Knee flexion angle (Hip - Knee - Ankle)
-        l_knee = calculate_angle_2d(l_hip, l_kn, l_ak) if (l_hip and l_kn and l_ak) else 180.0
-        r_knee = calculate_angle_2d(r_hip, r_kn, r_ak) if (r_hip and r_kn and r_ak) else 180.0
-        primary_knee = l_knee if side == "left" else r_knee
-        knee_diff = abs(l_knee - r_knee)
-
-        # 2. Hip flexion angle (Shoulder - Hip - Knee)
+        p_sh = l_sh or r_sh
+        p_hip = l_hip or r_hip
+        p_kn = l_kn or r_kn
         hip_angle = calculate_angle_2d(p_sh, p_hip, p_kn) if (p_sh and p_hip and p_kn) else 180.0
-
-        # 3. Trunk inclination angle from vertical (Shoulder to Hip)
-        trunk_lean = calculate_vertical_angle(p_sh, p_hip) if (p_sh and p_hip) else 15.0
 
         return {
             "knee_angle": round(primary_knee, 1),
             "knee_left_angle": round(l_knee, 1),
             "knee_right_angle": round(r_knee, 1),
+            "avg_knee_angle": round(avg_knee, 1),
+            "hip_y": round(hip_y, 1),
             "knee_symmetry_diff": round(knee_diff, 1),
+            "knee_ankle_ratio": round(knee_ankle_ratio, 2),
             "hip_angle": round(hip_angle, 1),
+            "torso_angle": round(trunk_lean, 1),
             "trunk_lean_angle": round(trunk_lean, 1)
         }
 
@@ -145,63 +137,76 @@ class SquatAnalyzer(BaseExerciseAnalyzer):
         side_view: bool = False
     ) -> Tuple[Optional[float], List[LiveFeedbackItem], bool]:
         knee = measurements.get("knee_angle", 180.0)
-        hip = measurements.get("hip_angle", 180.0)
-        trunk_lean = measurements.get("trunk_lean_angle", 15.0)
+        trunk_lean = measurements.get("trunk_lean_angle", measurements.get("torso_angle", 15.0))
         knee_diff = measurements.get("knee_symmetry_diff", 0.0)
+        knee_ankle_ratio = measurements.get("knee_ankle_ratio", 1.0)
 
         feedback: List[LiveFeedbackItem] = []
         is_valid = True
 
-        # Check Depth
-        if self.phase_detector.current_phase == "BOTTOM":
-            if knee > 105.0:
-                feedback.append(LiveFeedbackItem(
-                    code="INCREASE_DEPTH",
-                    message="Increase your squat depth. Aim for thighs parallel to ground.",
-                    severity=FeedbackSeverity.WARNING
-                ))
-            elif knee <= 90.0:
-                feedback.append(LiveFeedbackItem(
-                    code="EXCELLENT_DEPTH",
-                    message="Great squat depth!",
-                    severity=FeedbackSeverity.INFO
-                ))
+        # 1. Depth assessment
+        if knee <= 100.0:
+            feedback.append(LiveFeedbackItem(
+                code="GOOD_DEPTH",
+                message="Good squat depth!",
+                severity=FeedbackSeverity.INFO
+            ))
+        elif 100.0 < knee <= 120.0:
+            feedback.append(LiveFeedbackItem(
+                code="MODERATE_DEPTH",
+                message="Squat a bit deeper to reach parallel thighs.",
+                severity=FeedbackSeverity.WARNING
+            ))
+        elif 120.0 < knee < 150.0:
+            feedback.append(LiveFeedbackItem(
+                code="SHALLOW_DEPTH",
+                message="Squat deeper: hips should reach knee level.",
+                severity=FeedbackSeverity.WARNING
+            ))
 
-        # Check Trunk posture
-        if trunk_lean > 45.0:
+        # 2. Knee alignment & valgus
+        if knee_ankle_ratio < 0.82 and not side_view:
+            feedback.append(LiveFeedbackItem(
+                code="KNEE_VALGUS",
+                message="Push your knees out in line with your toes.",
+                severity=FeedbackSeverity.WARNING
+            ))
+        elif knee_diff > 25.0:
+            feedback.append(LiveFeedbackItem(
+                code="UNEVEN_SQUAT",
+                message="Distribute weight evenly between both legs.",
+                severity=FeedbackSeverity.WARNING
+            ))
+
+        # 3. Torso inclination
+        if trunk_lean > 42.0:
             feedback.append(LiveFeedbackItem(
                 code="EXCESSIVE_FORWARD_LEAN",
-                message="Keep your torso more upright and chest proud.",
+                message="Keep your chest up and avoid excessive forward lean.",
                 severity=FeedbackSeverity.WARNING
             ))
             is_valid = False
 
-        # Check Lockout at top
-        if self.phase_detector.current_phase in ("TOP", "START"):
-            if knee < 160.0 or hip < 160.0:
-                feedback.append(LiveFeedbackItem(
-                    code="INCOMPLETE_EXTENSION",
-                    message="Stand tall and extend hips fully at the top.",
-                    severity=FeedbackSeverity.INFO
-                ))
-
-        # Check symmetry
-        if knee_diff > 25.0:
+        # 4. Incomplete extension lockout
+        if 150.0 <= knee < 160.0:
             feedback.append(LiveFeedbackItem(
-                code="UNEVEN_SQUAT",
-                message="Maintain consistent knee alignment and weight distribution.",
-                severity=FeedbackSeverity.WARNING
+                code="INCOMPLETE_EXTENSION",
+                message="Stand tall and extend hips and knees fully at top.",
+                severity=FeedbackSeverity.INFO
             ))
 
         # Form score
-        depth_score = 90.0
-        if self.phase_detector.current_phase == "BOTTOM":
-            depth_score = max(30.0, min(100.0, 100.0 - max(0.0, knee - 90.0) * 2.0))
+        if knee <= 100.0:
+            depth_score = max(70.0, min(100.0, 100.0 - max(0.0, knee - 90.0) * 1.5))
+        elif knee >= 155.0:
+            depth_score = 95.0
+        else:
+            depth_score = max(40.0, 100.0 - (knee - 95.0) * 1.2)
 
-        posture_score = max(0.0, min(100.0, 100.0 - max(0.0, trunk_lean - 30.0) * 2.5))
-        symmetry_score = max(0.0, min(100.0, 100.0 - knee_diff * 2.0))
+        posture_score = max(0.0, min(100.0, 100.0 - max(0.0, trunk_lean - 25.0) * 2.5))
+        alignment_score = max(0.0, min(100.0, 100.0 - knee_diff * 2.0 - max(0.0, 1.0 - knee_ankle_ratio) * 40.0))
 
-        overall_score = round(0.40 * depth_score + 0.35 * posture_score + 0.25 * symmetry_score, 1)
+        overall_score = round(0.40 * depth_score + 0.35 * posture_score + 0.25 * alignment_score, 1)
 
         return overall_score, feedback, is_valid
 
@@ -212,28 +217,25 @@ class SquatAnalyzer(BaseExerciseAnalyzer):
         side_view: bool = False
     ) -> List[LiveScoringMetric]:
         knee = measurements.get("knee_angle", 180.0)
-        hip = measurements.get("hip_angle", 180.0)
-        trunk_lean = measurements.get("trunk_lean_angle", 15.0)
+        trunk_lean = measurements.get("trunk_lean_angle", measurements.get("torso_angle", 15.0))
         knee_diff = measurements.get("knee_symmetry_diff", 0.0)
+        knee_ankle_ratio = measurements.get("knee_ankle_ratio", 1.0)
 
         # 1. Depth
-        if knee <= 100.0 or self.phase_detector.current_phase == "BOTTOM":
-            depth_score = max(20.0, min(100.0, 100.0 - max(0.0, knee - 90.0) * 2.0))
-        elif knee >= 155.0 or self.phase_detector.current_phase in ("TOP", "START"):
-            depth_score = max(50.0, min(100.0, 100.0 - max(0.0, 165.0 - knee) * 2.0))
+        if knee <= 100.0:
+            depth_score = max(60.0, min(100.0, 100.0 - max(0.0, knee - 90.0) * 1.5))
+        elif knee >= 155.0:
+            depth_score = 95.0
         else:
-            depth_score = 85.0
+            depth_score = max(40.0, 100.0 - (knee - 95.0) * 1.2)
 
         # 2. Knee alignment & symmetry
-        knee_score = max(0.0, min(100.0, 100.0 - knee_diff * 2.5))
+        knee_score = max(0.0, min(100.0, 100.0 - knee_diff * 2.0 - max(0.0, 1.0 - knee_ankle_ratio) * 40.0))
 
-        # 3. Hip mechanics
-        hip_score = max(0.0, min(100.0, 100.0 - max(0.0, hip - 120.0) * 0.5))
+        # 3. Torso position
+        trunk_score = max(0.0, min(100.0, 100.0 - max(0.0, trunk_lean - 25.0) * 2.5))
 
-        # 4. Trunk positioning
-        trunk_score = max(0.0, min(100.0, 100.0 - max(0.0, trunk_lean - 30.0) * 2.5))
-
-        # 5. Movement control
+        # 4. Movement control
         control_score = 88.0
 
         return [
@@ -241,7 +243,7 @@ class SquatAnalyzer(BaseExerciseAnalyzer):
                 name="squat_depth",
                 value=knee,
                 score=round(depth_score, 1),
-                weight=0.25,
+                weight=0.35,
                 confidence=0.95,
                 status="VALID"
             ),
@@ -249,24 +251,16 @@ class SquatAnalyzer(BaseExerciseAnalyzer):
                 name="knee_alignment",
                 value=knee_diff,
                 score=round(knee_score, 1),
-                weight=0.20,
+                weight=0.25,
                 confidence=0.90,
                 status="VALID"
             ),
             LiveScoringMetric(
-                name="hip_mechanics",
-                value=hip,
-                score=round(hip_score, 1),
-                weight=0.20,
-                confidence=0.92,
-                status="VALID"
-            ),
-            LiveScoringMetric(
-                name="trunk_positioning",
+                name="torso_position",
                 value=trunk_lean,
                 score=round(trunk_score, 1),
-                weight=0.20,
-                confidence=0.93,
+                weight=0.25,
+                confidence=0.92,
                 status="VALID"
             ),
             LiveScoringMetric(
@@ -286,14 +280,23 @@ class SquatAnalyzer(BaseExerciseAnalyzer):
         measurements: Dict[str, float],
         timestamp_sec: float
     ) -> Tuple[Optional[float], Optional[int], Optional[str]]:
-        knee = measurements.get("knee_angle", 180.0)
-        reps, phase = self.phase_detector.update_dynamic_rep(
-            primary_metric_value=knee,
-            top_threshold=155.0,
-            bottom_threshold=95.0,
-            timestamp_sec=timestamp_sec,
-            is_valid_form=is_valid_frame
-        )
-        session.rep_count = reps
-        session.rep_phase = phase
-        return None, reps, phase
+        # Retrieve isolated session counter, or fallback if session object is mock/lacks it
+        if hasattr(session, "get_squat_counter"):
+            counter = session.get_squat_counter()
+        elif hasattr(session, "squat_counter") and session.squat_counter is not None:
+            counter = session.squat_counter
+        else:
+            counter = self._fallback_counter
+
+        if not is_valid_frame:
+            rep_res = counter.process_angle(None, timestamp_sec=timestamp_sec)
+        else:
+            knee = measurements.get("knee_angle", 180.0)
+            rep_res = counter.process_angle(knee, timestamp_sec=timestamp_sec)
+
+        if hasattr(session, "rep_count"):
+            session.rep_count = rep_res.rep_count
+        if hasattr(session, "rep_phase"):
+            session.rep_phase = rep_res.current_state
+
+        return None, rep_res.rep_count, rep_res.current_state

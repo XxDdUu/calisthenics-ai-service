@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 from app.biomechanics.feedback_engine import FeedbackEngine
 from app.biomechanics.scoring_engine import ExerciseScoringEngine
 from app.biomechanics.smoothing import TemporalKeypointSmoother
+from app.biomechanics.squat_counter import SquatRepCounter
 from app.core.config import settings
 from app.pose.tracking import PersonTracker
 from app.schemas.analysis import KeypointData
@@ -42,6 +43,13 @@ class LiveSession:
     # Dynamic repetition tracking
     rep_count: int = 0
     rep_phase: str = "START"
+    squat_counter: Optional[SquatRepCounter] = None
+
+    def get_squat_counter(self) -> SquatRepCounter:
+        """Get or initialize the dedicated squat counter for this session."""
+        if self.squat_counter is None:
+            self.squat_counter = SquatRepCounter()
+        return self.squat_counter
 
     # Multi-person tracker, Scoring engine, Feedback engine
     tracker: PersonTracker = field(default_factory=PersonTracker)
@@ -136,6 +144,8 @@ class LiveSession:
         self.tracker.reset()
         self.scoring_engine.reset()
         self.feedback_engine.reset()
+        if self.squat_counter is not None:
+            self.squat_counter.reset()
         self.last_active_at = time.time()
         logger.info("LiveSession %s reset.", self.session_id)
 
@@ -168,6 +178,8 @@ class LiveSessionManager:
                     progression=progression,
                     side_view=side_view
                 )
+                if exercise.upper() == "SQUAT":
+                    session.squat_counter = SquatRepCounter()
                 self._sessions[sid] = session
                 logger.info("Created new LiveSession %s for exercise '%s'", sid, exercise)
             else:
@@ -179,6 +191,10 @@ class LiveSessionManager:
                     session.progression = progression
                     session.side_view = side_view
                     session.reset()
+                    if exercise.upper() == "SQUAT":
+                        session.squat_counter = SquatRepCounter()
+                    else:
+                        session.squat_counter = None
                 session.side_view = side_view
                 session.last_active_at = time.time()
 

@@ -236,6 +236,11 @@ class LiveAnalysisPipeline:
                 pose_kp.detection_confidence, len(landmarks_list), missing_lms, t_infer_ms, t_total_ms
             )
 
+            # Inform session counter of tracking loss if squat
+            now_sec = (timestamp_ms / 1000.0) if timestamp_ms > 0 else time.time()
+            if session.squat_counter is not None:
+                session.squat_counter.process_angle(None, timestamp_sec=now_sec)
+
             return LiveAnalysisResponse(
                 status=pose_status,
                 exercise=exercise,
@@ -247,6 +252,14 @@ class LiveAnalysisPipeline:
                 feedback=feedback,
                 missing_landmarks=missing_lms,
                 landmarks=landmarks_list,
+                current_state=session.squat_counter.state.value if session.squat_counter else None,
+                knee_angle=round(session.squat_counter.smoothed_knee_angle, 1) if session.squat_counter else None,
+                min_knee_angle=round(session.squat_counter.min_knee_angle, 1) if session.squat_counter else None,
+                depth=session.squat_counter.depth_quality if session.squat_counter else None,
+                is_tracking=False,
+                rep_count=session.squat_counter.rep_count if session.squat_counter else None,
+                rep_phase=session.squat_counter.state.value if session.squat_counter else None,
+                phase=session.squat_counter.state.value if session.squat_counter else None,
                 timing=LiveTiming(
                     preprocessing_ms=round(t_pre_ms, 2),
                     inference_ms=round(t_infer_ms, 2),
@@ -339,6 +352,13 @@ class LiveAnalysisPipeline:
             len(landmarks_list), t_infer_ms, t_analysis_ms, t_total_ms
         )
 
+        sq_counter = session.squat_counter
+        current_state = sq_counter.state.value if sq_counter else rep_phase
+        knee_angle = round(sq_counter.smoothed_knee_angle, 1) if sq_counter else clean_measurements.get("knee_angle")
+        min_knee_angle = round(sq_counter.min_knee_angle, 1) if sq_counter else clean_measurements.get("knee_angle")
+        depth = sq_counter.depth_quality if sq_counter else None
+        is_tracking = sq_counter.is_tracking if sq_counter else True
+
         return LiveAnalysisResponse(
             status=LiveAnalysisStatus.VALID,
             exercise=exercise,
@@ -355,6 +375,11 @@ class LiveAnalysisPipeline:
             rep_count=rep_count,
             rep_phase=rep_phase,
             phase=rep_phase,
+            current_state=current_state,
+            knee_angle=knee_angle,
+            min_knee_angle=min_knee_angle,
+            depth=depth,
+            is_tracking=is_tracking,
             measurements=clean_measurements,
             scoring_metrics=scoring_metrics,
             raw_measurements=raw_measurements if debug else None,
