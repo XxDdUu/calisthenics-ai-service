@@ -12,7 +12,10 @@ import numpy as np
 
 from app.core.config import settings
 from app.core.logging_context import get_request_id, set_request_id
+from app.biomechanics.feedback_engine import FeedbackEngine
+from app.biomechanics.scoring_engine import ExerciseScoringEngine
 from app.exercises.registry import exercise_registry
+from app.pose.tracking import PersonTracker
 from app.pose.yolo_pose import COCO_KEYPOINTS, YOLOPoseEstimator
 from app.schemas.analysis import (
     KeypointData,
@@ -162,6 +165,9 @@ class VideoScoringPipeline:
             measurements_history: Dict[str, List[float]] = {}
 
             analyzer = exercise_registry.get_analyzer(exercise_name)
+            tracker = PersonTracker()
+            scoring_engine = ExerciseScoringEngine()
+            feedback_engine = FeedbackEngine()
             logger.info("[VIDEO_PIPELINE] aid=%s resolved analyzer=%s", aid, analyzer.name)
 
             frame_idx = 0
@@ -172,7 +178,8 @@ class VideoScoringPipeline:
 
                 if frame_idx % step == 0:
                     timestamp_ms = int((frame_idx / original_fps) * 1000)
-                    success_pose, pose_kp = self.pose_estimator.estimate_pose(frame)
+                    now_sec = timestamp_ms / 1000.0
+                    success_pose, pose_kp = self.pose_estimator.estimate_pose(frame, tracker=tracker)
 
                     if success_pose and pose_kp is not None and pose_kp.keypoints:
                         # Extract 17 COCO keypoints (normalized 0-1)
@@ -214,10 +221,25 @@ class VideoScoringPipeline:
                             side_view=side_view
                         )
 
-                        if f_score is not None:
-                            frame_scores.append(f_score)
+                        # Detailed exercise scoring metrics
+                        scoring_metrics = analyzer.evaluate_scoring_metrics(
+                            measurements=measurements,
+                            keypoints=pose_kp.keypoints,
+                            side_view=side_view
+                        )
+                        calculated_score, _, _, _ = scoring_engine.evaluate_score(
+                            metrics=scoring_metrics,
+                            keypoints=pose_kp.keypoints,
+                            required_landmarks=analyzer.required_landmarks
+                        )
 
-                        for fb in feedback_items:
+                        chosen_score = calculated_score if calculated_score is not None else f_score
+                        if chosen_score is not None:
+                            frame_scores.append(chosen_score)
+
+                        # Process feedback with deduplication
+                        processed_fb = feedback_engine.process_feedback(feedback_items, timestamp_sec=now_sec)
+                        for fb in processed_fb:
                             if fb.severity.name in ("WARNING", "ERROR"):
                                 frame_issues.append(fb.message)
                             elif fb.severity.name == "INFO":

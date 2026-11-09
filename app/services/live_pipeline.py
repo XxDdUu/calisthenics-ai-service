@@ -108,9 +108,17 @@ class LiveAnalysisPipeline:
 
         img_h, img_w = image_np.shape[:2]
 
-        # 3. YOLOv8 Pose Estimation
+        # Retrieve or initialize live session early for tracking & temporal smoothing
+        session = session_manager.get_or_create(
+            session_id=session_id,
+            exercise=exercise,
+            side_view=side_view
+        )
+        session.touch()
+
+        # 3. YOLOv8 Pose Estimation (with athlete tracking persistence)
         t_infer_start = time.perf_counter()
-        success, pose_kp = self.pose_estimator.estimate_pose(image_np)
+        success, pose_kp = self.pose_estimator.estimate_pose(image_np, tracker=session.tracker)
         t_infer_ms = (time.perf_counter() - t_infer_start) * 1000.0
 
         if not success or pose_kp is None or not pose_kp.keypoints:
@@ -136,7 +144,8 @@ class LiveAnalysisPipeline:
                     analysis_ms=0.0,
                     total_ms=round(t_total_ms, 2)
                 ),
-                session_id=session_id
+                session_id=session.session_id,
+                session_summary=session.get_session_summary()
             )
 
         # 4. Pose Landmark Extraction & Coordinate Mapping
@@ -198,17 +207,11 @@ class LiveAnalysisPipeline:
                     analysis_ms=round((time.perf_counter() - t_analysis_start) * 1000.0, 2),
                     total_ms=round(t_total_ms, 2)
                 ),
-                session_id=session_id
+                session_id=session.session_id,
+                session_summary=session.get_session_summary()
             )
 
-        # 6. Session Retrieval & Temporal Smoothing
-        session = session_manager.get_or_create(
-            session_id=session_id,
-            exercise=exercise,
-            side_view=side_view
-        )
-        session.touch()
-
+        # 6. Apply Temporal Smoothing
         # Apply EMA temporal filter to keypoints
         smoothed_kps = session.smooth_keypoints(raw_keypoints)
 
@@ -225,14 +228,37 @@ class LiveAnalysisPipeline:
         }
 
         # 8. Form Evaluation, Scoring, and Feedback
-        score, feedback_items, is_valid_frame = analyzer.evaluate_live_form(
+        legacy_score, feedback_items, is_valid_frame = analyzer.evaluate_live_form(
             measurements=clean_measurements,
             progression=exercise,
             side_view=side_view
         )
 
-        # 9. Dynamic State Update (Hold duration or Repetition count)
+        # Evaluate detailed scoring metrics per exercise
+        scoring_metrics = analyzer.evaluate_scoring_metrics(
+            measurements=clean_measurements,
+            keypoints=smoothed_kps,
+            side_view=side_view
+        )
+
+        # Calculate weighted scoring with dynamic normalization and reliability
+        overall_score, score_reliability, _, _ = session.scoring_engine.evaluate_score(
+            metrics=scoring_metrics,
+            keypoints=smoothed_kps,
+            required_landmarks=analyzer.required_landmarks
+        )
+
+        if overall_score is None:
+            overall_score = legacy_score
+
+        # Feedback Engine processing (cooldown & severity priority)
         now_sec = (timestamp_ms / 1000.0) if timestamp_ms > 0 else time.time()
+        processed_feedback = session.feedback_engine.process_feedback(
+            feedback_items,
+            timestamp_sec=now_sec
+        )
+
+        # 9. Dynamic State Update (Hold duration or Repetition count)
         hold_sec, rep_count, rep_phase = analyzer.update_dynamic_state(
             session=session,
             is_valid_frame=is_valid_frame,
@@ -240,8 +266,8 @@ class LiveAnalysisPipeline:
             timestamp_sec=now_sec
         )
 
-        if score is not None and score > session.peak_score:
-            session.peak_score = score
+        # Record performance history
+        session.record_frame_score(overall_score, hold_sec, rep_count)
 
         t_analysis_ms = (time.perf_counter() - t_analysis_start) * 1000.0
 
@@ -251,9 +277,9 @@ class LiveAnalysisPipeline:
             annotated_b64 = self._render_annotated_frame(
                 image_np=image_np,
                 keypoints=smoothed_kps,
-                score=score,
+                score=overall_score,
                 exercise=exercise,
-                feedback=feedback_items
+                feedback=processed_feedback
             )
 
         t_total_ms = (time.perf_counter() - t_pipeline_start) * 1000.0
@@ -265,14 +291,19 @@ class LiveAnalysisPipeline:
             frame_sequence=frame_sequence,
             pose_detected=True,
             confidence=round(pose_kp.detection_confidence, 3),
-            score=round(score, 1) if score is not None else None,
+            score=round(overall_score, 1) if overall_score is not None else None,
+            current_score=round(overall_score, 1) if overall_score is not None else None,
+            score_confidence=round(score_reliability, 2),
             is_valid_hold=is_valid_frame,
             hold_duration_sec=hold_sec,
+            hold_duration_ms=int(hold_sec * 1000) if hold_sec is not None else None,
             rep_count=rep_count,
             rep_phase=rep_phase,
+            phase=rep_phase,
             measurements=clean_measurements,
+            scoring_metrics=scoring_metrics,
             raw_measurements=raw_measurements if debug else None,
-            feedback=feedback_items,
+            feedback=processed_feedback,
             missing_landmarks=[],
             landmarks=landmarks_list,
             annotated_frame_base64=annotated_b64,
@@ -282,7 +313,8 @@ class LiveAnalysisPipeline:
                 analysis_ms=round(t_analysis_ms, 2),
                 total_ms=round(t_total_ms, 2)
             ),
-            session_id=session.session_id
+            session_id=session.session_id,
+            session_summary=session.get_session_summary()
         )
 
     def _render_annotated_frame(

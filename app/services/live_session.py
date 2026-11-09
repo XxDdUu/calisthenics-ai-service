@@ -4,9 +4,12 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from threading import Lock
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional
+from app.biomechanics.feedback_engine import FeedbackEngine
+from app.biomechanics.scoring_engine import ExerciseScoringEngine
 from app.biomechanics.smoothing import TemporalKeypointSmoother
 from app.core.config import settings
+from app.pose.tracking import PersonTracker
 from app.schemas.analysis import KeypointData
 
 logger = logging.getLogger(__name__)
@@ -39,6 +42,49 @@ class LiveSession:
     # Dynamic repetition tracking
     rep_count: int = 0
     rep_phase: str = "START"
+
+    # Multi-person tracker, Scoring engine, Feedback engine
+    tracker: PersonTracker = field(default_factory=PersonTracker)
+    scoring_engine: ExerciseScoringEngine = field(default_factory=ExerciseScoringEngine)
+    feedback_engine: FeedbackEngine = field(default_factory=FeedbackEngine)
+
+    # Session statistics
+    score_history: List[float] = field(default_factory=list)
+    lowest_score: float = 100.0
+    average_score: float = 0.0
+
+    def record_frame_score(
+        self,
+        score: Optional[float],
+        hold_duration: Optional[float] = None,
+        reps: Optional[int] = None
+    ) -> None:
+        if score is not None and score > 0:
+            self.score_history.append(score)
+            if score > self.peak_score:
+                self.peak_score = score
+            if score < self.lowest_score:
+                self.lowest_score = score
+            self.average_score = sum(self.score_history) / len(self.score_history)
+
+        if hold_duration is not None and hold_duration > self.peak_hold_duration_sec:
+            self.peak_hold_duration_sec = hold_duration
+
+        if reps is not None:
+            self.rep_count = reps
+
+    def get_session_summary(self) -> Dict[str, Any]:
+        return {
+            "sessionId": self.session_id,
+            "exercise": self.exercise,
+            "totalFrames": self.frame_count,
+            "durationSec": round(time.time() - self.created_at, 1),
+            "averageScore": round(self.average_score, 1) if self.score_history else 0.0,
+            "peakScore": round(self.peak_score, 1),
+            "lowestScore": round(self.lowest_score, 1) if self.score_history else 0.0,
+            "peakHoldDurationSec": round(self.peak_hold_duration_sec, 1),
+            "totalReps": self.rep_count
+        }
 
     def touch(self) -> None:
         self.last_active_at = time.time()
@@ -84,6 +130,12 @@ class LiveSession:
         self.rep_count = 0
         self.rep_phase = "START"
         self.frame_count = 0
+        self.score_history.clear()
+        self.lowest_score = 100.0
+        self.average_score = 0.0
+        self.tracker.reset()
+        self.scoring_engine.reset()
+        self.feedback_engine.reset()
         self.last_active_at = time.time()
         logger.info("LiveSession %s reset.", self.session_id)
 

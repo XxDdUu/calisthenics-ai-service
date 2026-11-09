@@ -6,6 +6,11 @@ import cv2
 import numpy as np
 from app.utils.pose_refinement import refine_wrists
 from app.biomechanics.side_view import resolve_side_view_chain
+from app.pose.tracking import (
+    DetectedPersonCandidate,
+    PersonTracker,
+    compute_derived_landmarks,
+)
 
 from app.core.config import settings
 from app.core.logging_context import get_request_id
@@ -194,7 +199,11 @@ class YOLOPoseEstimator:
             predictor.construct_result = traced_construct_result
             predictor._pose_coordinate_trace_installed = True
 
-    def estimate_pose(self, image_np: np.ndarray) -> Tuple[bool, Optional[PoseKeypoints]]:
+    def estimate_pose(
+        self,
+        image_np: np.ndarray,
+        tracker: Optional[PersonTracker] = None
+    ) -> Tuple[bool, Optional[PoseKeypoints]]:
         """
         Estimate pose keypoints from an RGB/BGR numpy image array.
         Returns (success: bool, PoseKeypoints or None).
@@ -273,25 +282,62 @@ class YOLOPoseEstimator:
 
             _t_kp_start = time.perf_counter()
             confs = conf_tensor.cpu().numpy()
-            best_idx = int(np.argmax(confs))
-            best_conf = float(confs[best_idx])
-            logger.debug("[YOLO] request_id=%s selected_person idx=%d detection_conf=%.4f num_people=%d image_ref=%dx%d",
-                         rid, best_idx, best_conf, len(confs), img_w, img_h)
-
+            xyxy_tensor = getattr(boxes, "xyxy", None)
             kp_data_tensor = keypoints.data
-            if best_idx >= len(kp_data_tensor):
-                logger.warning("[YOLO] request_id=%s selected index %d out of bounds for keypoints length %d.",
-                               rid, best_idx, len(kp_data_tensor))
+
+            if xyxy_tensor is None or len(xyxy_tensor) == 0:
+                logger.warning("[YOLO] request_id=%s bounding boxes missing xyxy coordinates.", rid)
                 return False, None
 
-            kp_raw_tensor = kp_data_tensor[best_idx].cpu().numpy()
-            kp_raw = np.copy(kp_raw_tensor)
+            candidates = []
+            num_people = min(len(confs), len(xyxy_tensor), len(kp_data_tensor))
 
-            # Log raw YOLO model output for all relevant joints
-            if kp_raw.shape[0] >= 17:
+            try:
+                xyxy_np = xyxy_tensor.cpu().numpy() if hasattr(xyxy_tensor, "cpu") else np.array(xyxy_tensor)
+            except Exception:
+                xyxy_np = None
+
+            for p_idx in range(num_people):
+                p_conf = float(confs[p_idx])
+                if xyxy_np is not None and len(xyxy_np) > p_idx:
+                    box_item = xyxy_np[p_idx]
+                else:
+                    item_ref = xyxy_tensor[p_idx]
+                    box_item = item_ref.cpu().numpy() if hasattr(item_ref, "cpu") else np.array(item_ref)
+                p_box = [float(c) for c in np.ravel(box_item)[:4]]
+                if len(p_box) < 4:
+                    p_box = [0.0, 0.0, 100.0, 100.0]
+
+                kp_elem = kp_data_tensor[p_idx]
+                p_kp_raw = kp_elem.cpu().numpy() if hasattr(kp_elem, "cpu") else np.array(kp_elem)
+                
+                if p_kp_raw.shape[0] >= 17:
+                    for idx, kp_name in enumerate(COCO_KEYPOINTS):
+                        rx, ry = float(p_kp_raw[idx][0]), float(p_kp_raw[idx][1])
+                        rc = float(p_kp_raw[idx][2]) if p_kp_raw.shape[1] >= 3 else p_conf
+                        if kp_name in (
+                            "left_shoulder", "right_shoulder",
+                            "left_hip", "right_hip",
+                            "left_knee", "right_knee",
+                            "left_ankle", "right_ankle",
+                            "left_elbow", "right_elbow",
+                            "left_wrist", "right_wrist"
+                        ):
+                            log = logger.info if kp_name in (
+                                "left_knee", "right_knee", "left_elbow", "right_elbow"
+                            ) else logger.debug
+                            log(
+                                "[YOLO] request_id=%s stage=ultralytics_postprocessed_output idx=%d name=%s "
+                                "x=%.2f y=%.2f conf=%.4f visible=%s (original_image=%dx%d)",
+                                rid, idx, kp_name, rx, ry, rc, rc >= self.keypoint_conf_threshold, img_w, img_h
+                            )
+
+                p_kp_arr = refine_wrists(p_kp_raw)
+
+                if p_kp_arr.ndim != 2 or p_kp_arr.shape[0] < 17:
+                    continue
+
                 for idx, kp_name in enumerate(COCO_KEYPOINTS):
-                    rx, ry = float(kp_raw[idx][0]), float(kp_raw[idx][1])
-                    rc = float(kp_raw[idx][2]) if kp_raw.shape[1] >= 3 else best_conf
                     if kp_name in (
                         "left_shoulder", "right_shoulder",
                         "left_hip", "right_hip",
@@ -300,29 +346,9 @@ class YOLOPoseEstimator:
                         "left_elbow", "right_elbow",
                         "left_wrist", "right_wrist"
                     ):
-                        log = logger.info if kp_name in (
-                            "left_knee", "right_knee", "left_elbow", "right_elbow"
-                        ) else logger.debug
-                        log(
-                            "[YOLO] request_id=%s stage=ultralytics_postprocessed_output idx=%d name=%s "
-                            "x=%.2f y=%.2f conf=%.4f visible=%s (original_image=%dx%d)",
-                            rid, idx, kp_name, rx, ry, rc, rc >= self.keypoint_conf_threshold, img_w, img_h
-                        )
-
-            kp_array = refine_wrists(kp_raw_tensor)
-            if kp_array.shape[0] >= 17:
-                for idx, kp_name in enumerate(COCO_KEYPOINTS):
-                    if kp_name in (
-                        "left_shoulder", "right_shoulder",
-                        "left_hip", "right_hip",
-                        "left_knee", "right_knee",
-                        "left_ankle", "right_ankle",
-                        "left_elbow", "right_elbow",
-                        "left_wrist", "right_wrist"
-                    ):
-                        jx, jy = float(kp_array[idx][0]), float(kp_array[idx][1])
-                        jc = float(kp_array[idx][2]) if kp_array.shape[1] >= 3 else best_conf
-                        rx, ry = float(kp_raw[idx][0]), float(kp_raw[idx][1])
+                        jx, jy = float(p_kp_arr[idx][0]), float(p_kp_arr[idx][1])
+                        jc = float(p_kp_arr[idx][2]) if p_kp_arr.shape[1] >= 3 else p_conf
+                        rx, ry = float(p_kp_raw[idx][0]), float(p_kp_raw[idx][1])
                         delta_str = f" delta=(dx={jx-rx:+.2f}, dy={jy-ry:+.2f})" if (abs(jx-rx) > 0.01 or abs(jy-ry) > 0.01) else ""
                         log = logger.info if kp_name in (
                             "left_knee", "right_knee", "left_elbow", "right_elbow"
@@ -333,32 +359,47 @@ class YOLOPoseEstimator:
                             rid, kp_name, idx, jx, jy, jc, delta_str
                         )
 
-            xyxy_tensor = getattr(boxes, "xyxy", None)
-            if xyxy_tensor is None or best_idx >= len(xyxy_tensor):
-                logger.warning("[YOLO] request_id=%s bounding boxes missing xyxy coordinates.", rid)
+                p_kps = {}
+                for idx, kp_name in enumerate(COCO_KEYPOINTS):
+                    x = float(p_kp_arr[idx][0])
+                    y = float(p_kp_arr[idx][1])
+                    c = float(p_kp_arr[idx][2]) if p_kp_arr.shape[1] >= 3 else p_conf
+                    p_kps[kp_name] = KeypointData(
+                        x=x, y=y, confidence=c, name=kp_name,
+                        visible=c >= self.keypoint_conf_threshold
+                    )
+
+                candidates.append(DetectedPersonCandidate(
+                    box=p_box,
+                    confidence=p_conf,
+                    keypoints=p_kps
+                ))
+
+            if not candidates:
+                logger.warning("[YOLO] request_id=%s no valid candidate extracted.", rid)
                 return False, None
 
-            box_tensor = xyxy_tensor[best_idx].cpu().numpy()
+            if tracker is not None:
+                track_res = tracker.select_athlete(candidates)
+                if track_res is None:
+                    return False, None
+                selected_cand, _ = track_res
+            else:
+                best_cand_idx = int(np.argmax(confs[:len(candidates)]))
+                selected_cand = candidates[best_cand_idx]
 
-            if kp_array.ndim != 2 or kp_array.shape[0] < 17:
-                logger.warning("[YOLO] request_id=%s keypoint tensor shape %s invalid, expected at least (17, 3).",
-                               rid, kp_array.shape)
-                return False, None
+            keypoints_dict = dict(selected_cand.keypoints)
+            box_tensor = selected_cand.box
+            best_conf = selected_cand.confidence
 
-            keypoints_dict: Dict[str, KeypointData] = {}
-            for idx, kp_name in enumerate(COCO_KEYPOINTS):
-                x = float(kp_array[idx][0])
-                y = float(kp_array[idx][1])
-                conf = float(kp_array[idx][2]) if kp_array.shape[1] >= 3 else best_conf
-                visible = conf >= self.keypoint_conf_threshold
-                keypoints_dict[kp_name] = KeypointData(
-                    x=x, y=y, confidence=conf, name=kp_name, visible=visible
-                )
+            # Compute Derived Landmarks
+            derived = compute_derived_landmarks(keypoints_dict, conf_threshold=self.keypoint_conf_threshold)
 
             pose_kp = PoseKeypoints(
                 keypoints=keypoints_dict,
                 bounding_box=[float(box_tensor[0]), float(box_tensor[1]), float(box_tensor[2]), float(box_tensor[3])],
-                detection_confidence=best_conf
+                detection_confidence=best_conf,
+                derived_landmarks=derived
             )
             t_kp_extract_ms = (time.perf_counter() - _t_kp_start) * 1000.0
             logger.debug("[TIMING] request_id=%s stage=keypoint_extraction duration_ms=%.2f", rid, t_kp_extract_ms)

@@ -7,6 +7,7 @@ from app.schemas.analysis import (
     KeypointData,
     LiveAnalysisStatus,
     LiveFeedbackItem,
+    LiveScoringMetric,
 )
 
 
@@ -14,13 +15,13 @@ class BaseExerciseAnalyzer(abc.ABC):
     """
     Abstract base class for all exercise analyzers.
     Defines required landmarks, biomechanical measurement extraction,
-    deterministic form scoring, and actionable coaching cues.
+    deterministic form scoring, movement phase detection, and actionable coaching cues.
     """
 
     @property
     @abc.abstractmethod
     def name(self) -> str:
-        """Primary exercise name (e.g., 'FULL_PLANCHE', 'FRONT_LEVER')."""
+        """Primary exercise name (e.g., 'FULL_PLANCHE', 'FRONT_LEVER', 'PUSH_UP')."""
         pass
 
     @property
@@ -28,6 +29,21 @@ class BaseExerciseAnalyzer(abc.ABC):
     def required_landmarks(self) -> List[str]:
         """List of essential COCO keypoints required to analyze this exercise."""
         pass
+
+    @property
+    def is_dynamic(self) -> bool:
+        """True if exercise is repetition-based (Push-up, Squat); False for static holds (Planche)."""
+        return False
+
+    @property
+    def scoring_weights(self) -> Dict[str, float]:
+        """Configurable metric weights for overall score calculation."""
+        return {}
+
+    @property
+    def camera_view_recommendation(self) -> str:
+        """Coaching guidance for optimal camera placement."""
+        return "Position camera side-on at torso height, 2.5m away with full body visible."
 
     def validate_pose(
         self,
@@ -116,3 +132,26 @@ class BaseExerciseAnalyzer(abc.ABC):
             session.hold_start_time = None
             session.current_hold_duration_sec = 0.0
             return 0.0, None, "REST"
+
+    def evaluate_scoring_metrics(
+        self,
+        measurements: Dict[str, float],
+        keypoints: Optional[Dict[str, KeypointData]] = None,
+        side_view: bool = False
+    ) -> List[LiveScoringMetric]:
+        """
+        Generate granular technique metrics with weights and status.
+        Default fallback implementation wraps evaluate_live_form.
+        """
+        score, _, is_valid = self.evaluate_live_form(measurements, side_view=side_view)
+        s_val = score if score is not None else 50.0
+        return [
+            LiveScoringMetric(
+                name="form_accuracy",
+                value=s_val,
+                score=s_val,
+                weight=1.0,
+                confidence=0.9 if is_valid else 0.5,
+                status="VALID" if is_valid else "LOW_CONFIDENCE"
+            )
+        ]

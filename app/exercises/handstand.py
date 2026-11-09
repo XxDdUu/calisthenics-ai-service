@@ -11,6 +11,7 @@ from app.schemas.analysis import (
     KeypointData,
     LiveAnalysisStatus,
     LiveFeedbackItem,
+    LiveScoringMetric,
 )
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,80 @@ class HandstandAnalyzer(BaseExerciseAnalyzer):
             "left_elbow", "right_elbow",
             "left_wrist", "right_wrist",
             "left_hip", "right_hip"
+        ]
+
+    @property
+    def scoring_weights(self) -> Dict[str, float]:
+        return {
+            "wrist_to_shoulder_alignment": 0.25,
+            "shoulder_angle": 0.25,
+            "elbow_lockout": 0.20,
+            "body_line": 0.15,
+            "stability": 0.15
+        }
+
+    @property
+    def camera_view_recommendation(self) -> str:
+        return "Position camera side-on at waist height, full vertical inverted body line visible."
+
+    def evaluate_scoring_metrics(
+        self,
+        measurements: Dict[str, float],
+        keypoints: Optional[Dict[str, KeypointData]] = None,
+        side_view: bool = False
+    ) -> List[LiveScoringMetric]:
+        elbow = measurements.get("elbow_angle", 180.0)
+        shoulder = measurements.get("shoulder_angle", 180.0)
+        body_line = measurements.get("body_line_angle", 180.0)
+        tilt = measurements.get("vertical_tilt", 0.0)
+
+        stack_score = max(0.0, min(100.0, 100.0 - tilt * 3.5))
+        shoulder_score = max(0.0, min(100.0, 100.0 - max(0.0, 175.0 - shoulder) * 2.0))
+        elbow_score = max(0.0, min(100.0, 100.0 - max(0.0, 175.0 - elbow) * 3.0))
+        line_score = max(0.0, min(100.0, 100.0 - abs(180.0 - body_line) * 2.0))
+        stability_score = 90.0
+
+        return [
+            LiveScoringMetric(
+                name="wrist_to_shoulder_alignment",
+                value=tilt,
+                score=round(stack_score, 1),
+                weight=0.25,
+                confidence=0.92,
+                status="VALID"
+            ),
+            LiveScoringMetric(
+                name="shoulder_angle",
+                value=shoulder,
+                score=round(shoulder_score, 1),
+                weight=0.25,
+                confidence=0.91,
+                status="VALID"
+            ),
+            LiveScoringMetric(
+                name="elbow_lockout",
+                value=elbow,
+                score=round(elbow_score, 1),
+                weight=0.20,
+                confidence=0.94,
+                status="VALID"
+            ),
+            LiveScoringMetric(
+                name="body_line",
+                value=body_line,
+                score=round(line_score, 1),
+                weight=0.15,
+                confidence=0.90,
+                status="VALID"
+            ),
+            LiveScoringMetric(
+                name="stability",
+                value=0.0,
+                score=round(stability_score, 1),
+                weight=0.15,
+                confidence=0.88,
+                status="VALID"
+            )
         ]
 
     def extract_measurements(

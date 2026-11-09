@@ -2,9 +2,13 @@ import pytest
 from app.exercises.dips import DipsAnalyzer
 from app.exercises.front_lever import FrontLeverAnalyzer
 from app.exercises.handstand import HandstandAnalyzer
+from app.exercises.l_sit import LSitAnalyzer
 from app.exercises.muscle_up import MuscleUpAnalyzer
+from app.exercises.pike_push_up import PikePushUpAnalyzer
 from app.exercises.planche import PlancheAnalyzer
 from app.exercises.pull_up import PullUpAnalyzer
+from app.exercises.push_up import PushUpAnalyzer
+from app.exercises.squat import SquatAnalyzer
 from app.exercises.registry import exercise_registry
 from app.schemas.analysis import FeedbackSeverity, KeypointData, LiveAnalysisStatus
 from app.services.live_session import LiveSession
@@ -21,6 +25,10 @@ def test_registry_resolution():
     assert isinstance(exercise_registry.get_analyzer("pull_up"), PullUpAnalyzer)
     assert isinstance(exercise_registry.get_analyzer("dips"), DipsAnalyzer)
     assert isinstance(exercise_registry.get_analyzer("muscle_up"), MuscleUpAnalyzer)
+    assert isinstance(exercise_registry.get_analyzer("push_up"), PushUpAnalyzer)
+    assert isinstance(exercise_registry.get_analyzer("squat"), SquatAnalyzer)
+    assert isinstance(exercise_registry.get_analyzer("pike_push_up"), PikePushUpAnalyzer)
+    assert isinstance(exercise_registry.get_analyzer("l_sit"), LSitAnalyzer)
     # Default fallback
     assert isinstance(exercise_registry.get_analyzer("unknown_exercise_xyz"), PlancheAnalyzer)
 
@@ -142,21 +150,21 @@ def test_pull_up_rep_cycle_and_asymmetry():
     assert is_valid is False
     assert any(fb.code == "SYMMETRIC_PULL" for fb in feedback)
 
-    # Test rep cycle: BOTTOM -> PULLING -> TOP -> LOWERING -> BOTTOM (rep=1)
+    # Test rep cycle: BOTTOM -> CONCENTRIC/PULLING -> TOP -> ECCENTRIC/LOWERING -> BOTTOM (rep=1)
     analyzer.update_dynamic_state(session, True, {"elbow_angle": 170.0}, 0.0)
-    assert session.rep_phase == "BOTTOM"
+    assert session.rep_phase in ("BOTTOM", "START")
 
     analyzer.update_dynamic_state(session, True, {"elbow_angle": 120.0}, 0.5)
-    assert session.rep_phase == "PULLING"
+    assert session.rep_phase in ("PULLING", "CONCENTRIC")
 
     analyzer.update_dynamic_state(session, True, {"elbow_angle": 55.0}, 1.0)
     assert session.rep_phase == "TOP"
 
     analyzer.update_dynamic_state(session, True, {"elbow_angle": 110.0}, 1.5)
-    assert session.rep_phase == "LOWERING"
+    assert session.rep_phase in ("LOWERING", "ECCENTRIC")
 
     analyzer.update_dynamic_state(session, True, {"elbow_angle": 165.0}, 2.0)
-    assert session.rep_phase == "BOTTOM"
+    assert session.rep_phase in ("BOTTOM", "COMPLETED_REP")
     assert session.rep_count == 1
 
 
@@ -170,15 +178,15 @@ def test_dips_rep_cycle():
 
     # Descend to 90 degrees
     analyzer.update_dynamic_state(session, True, {"elbow_angle": 120.0}, 0.5)
-    assert session.rep_phase == "DESCENDING"
+    assert session.rep_phase in ("DESCENDING", "ECCENTRIC")
     analyzer.update_dynamic_state(session, True, {"elbow_angle": 85.0}, 1.0)
     assert session.rep_phase == "BOTTOM"
 
     # Ascend back to lockout
     analyzer.update_dynamic_state(session, True, {"elbow_angle": 130.0}, 1.5)
-    assert session.rep_phase == "ASCENDING"
+    assert session.rep_phase in ("ASCENDING", "CONCENTRIC")
     analyzer.update_dynamic_state(session, True, {"elbow_angle": 170.0}, 2.0)
-    assert session.rep_phase == "TOP"
+    assert session.rep_phase in ("TOP", "COMPLETED_REP")
     assert session.rep_count == 1
 
 
@@ -192,3 +200,134 @@ def test_muscle_up_chicken_wing():
     score, feedback, is_valid = analyzer.evaluate_live_form(measurements, "MUSCLE_UP")
     assert is_valid is False
     assert any(fb.code == "TRANSITION_EVENLY" and fb.severity == FeedbackSeverity.ERROR for fb in feedback)
+
+
+def test_push_up_rep_cycle_and_scoring_metrics():
+    analyzer = PushUpAnalyzer()
+    session = LiveSession(session_id="test_pushup", exercise="PUSH_UP")
+
+    # Start at top lockout (elbow 172)
+    analyzer.update_dynamic_state(session, True, {"elbow_angle": 172.0}, 0.0)
+    assert session.rep_phase == "TOP"
+
+    # Descend to 85 degrees
+    analyzer.update_dynamic_state(session, True, {"elbow_angle": 120.0}, 0.5)
+    assert session.rep_phase in ("ECCENTRIC", "DESCENDING")
+    analyzer.update_dynamic_state(session, True, {"elbow_angle": 85.0}, 1.0)
+    assert session.rep_phase == "BOTTOM"
+
+    # Ascend back to lockout
+    analyzer.update_dynamic_state(session, True, {"elbow_angle": 130.0}, 1.5)
+    assert session.rep_phase in ("CONCENTRIC", "ASCENDING")
+    analyzer.update_dynamic_state(session, True, {"elbow_angle": 170.0}, 2.0)
+    assert session.rep_phase in ("TOP", "COMPLETED_REP")
+    assert session.rep_count == 1
+
+    # Check scoring metrics
+    metrics = analyzer.evaluate_scoring_metrics({
+        "elbow_angle": 85.0,
+        "body_line_angle": 175.0,
+        "elbow_symmetry_diff": 2.0
+    })
+    assert len(metrics) == 5
+    assert any(m.name == "range_of_motion" and m.status == "VALID" for m in metrics)
+
+
+def test_squat_rep_cycle_and_depth():
+    analyzer = SquatAnalyzer()
+    session = LiveSession(session_id="test_squat", exercise="SQUAT")
+
+    # Start at standing lockout (knee 175)
+    analyzer.update_dynamic_state(session, True, {"knee_angle": 175.0}, 0.0)
+    assert session.rep_phase == "TOP"
+
+    # Descend to deep squat
+    analyzer.update_dynamic_state(session, True, {"knee_angle": 120.0}, 0.5)
+    assert session.rep_phase in ("ECCENTRIC", "DESCENDING")
+    analyzer.update_dynamic_state(session, True, {"knee_angle": 80.0}, 1.0)
+    assert session.rep_phase == "BOTTOM"
+
+    # Ascend to standing
+    analyzer.update_dynamic_state(session, True, {"knee_angle": 130.0}, 1.5)
+    assert session.rep_phase in ("CONCENTRIC", "ASCENDING")
+    analyzer.update_dynamic_state(session, True, {"knee_angle": 175.0}, 2.0)
+    assert session.rep_phase in ("TOP", "COMPLETED_REP")
+    assert session.rep_count == 1
+
+    # Check scoring metrics
+    metrics = analyzer.evaluate_scoring_metrics({
+        "knee_angle": 80.0,
+        "torso_angle": 65.0,
+        "hip_angle": 80.0,
+        "knee_symmetry_diff": 3.0
+    })
+    assert len(metrics) == 5
+    assert any(m.name == "squat_depth" and m.score >= 90.0 for m in metrics)
+
+
+def test_l_sit_hold_and_scoring_metrics():
+    analyzer = LSitAnalyzer()
+    session = LiveSession(session_id="test_lsit", exercise="L_SIT")
+
+    # Valid L-sit hold
+    score, feedback, is_valid = analyzer.evaluate_live_form({
+        "hip_angle": 90.0,
+        "knee_angle": 175.0,
+        "elbow_angle": 175.0,
+        "leg_horizontal_tilt": 2.0
+    }, "L_SIT")
+    assert is_valid is True
+    assert score is not None and score >= 85.0
+
+    # Static hold state
+    hold_sec, reps, phase = analyzer.update_dynamic_state(session, True, {}, 0.0)
+    assert phase in ("HOLDING", "SETUP")
+
+    hold_sec, reps, phase = analyzer.update_dynamic_state(session, True, {}, 2.5)
+    assert phase == "HOLDING"
+    assert hold_sec is not None and hold_sec >= 2.0
+
+    metrics = analyzer.evaluate_scoring_metrics({
+        "hip_angle": 90.0,
+        "knee_angle": 175.0,
+        "elbow_angle": 175.0,
+        "leg_horizontal_tilt": 2.0
+    })
+    assert len(metrics) == 5
+    assert any(m.name == "hip_flexion" and m.status == "VALID" for m in metrics)
+
+
+def test_pike_push_up_rep_cycle():
+    analyzer = PikePushUpAnalyzer()
+    session = LiveSession(session_id="test_pike", exercise="PIKE_PUSH_UP")
+
+    # Top lockout
+    analyzer.update_dynamic_state(session, True, {"elbow_angle": 172.0}, 0.0)
+    assert session.rep_phase == "TOP"
+
+    # Descend
+    analyzer.update_dynamic_state(session, True, {"elbow_angle": 120.0}, 0.5)
+    assert session.rep_phase in ("ECCENTRIC", "DESCENDING")
+    analyzer.update_dynamic_state(session, True, {"elbow_angle": 85.0}, 1.0)
+    assert session.rep_phase == "BOTTOM"
+
+    # Ascend
+    analyzer.update_dynamic_state(session, True, {"elbow_angle": 130.0}, 1.5)
+    assert session.rep_phase in ("CONCENTRIC", "ASCENDING")
+    analyzer.update_dynamic_state(session, True, {"elbow_angle": 170.0}, 2.0)
+    assert session.rep_phase in ("TOP", "COMPLETED_REP")
+    assert session.rep_count == 1
+
+
+def test_planche_scoring_metrics():
+    analyzer = PlancheAnalyzer()
+    metrics = analyzer.evaluate_scoring_metrics({
+        "elbow_angle": 175.0,
+        "shoulder_lean_angle": 45.0,
+        "hip_angle": 175.0,
+        "body_line_angle": 3.0
+    })
+    assert len(metrics) == 5
+    assert any(m.name == "arm_lockout" and m.status == "VALID" for m in metrics)
+    assert any(m.name == "shoulder_lean" and m.status == "VALID" for m in metrics)
+

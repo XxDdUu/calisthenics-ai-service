@@ -4,9 +4,13 @@ from app.exercises.base import BaseExerciseAnalyzer
 from app.exercises.dips import DipsAnalyzer
 from app.exercises.front_lever import FrontLeverAnalyzer
 from app.exercises.handstand import HandstandAnalyzer
+from app.exercises.l_sit import LSitAnalyzer
 from app.exercises.muscle_up import MuscleUpAnalyzer
+from app.exercises.pike_push_up import PikePushUpAnalyzer
 from app.exercises.planche import PlancheAnalyzer
 from app.exercises.pull_up import PullUpAnalyzer
+from app.exercises.push_up import PushUpAnalyzer
+from app.exercises.squat import SquatAnalyzer
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +95,42 @@ class ExerciseRegistry:
             ]
         )
 
+        # 7. Push-Up
+        push_up = PushUpAnalyzer()
+        self.register(
+            push_up,
+            [
+                "PUSH_UP", "PUSHUP", "PRESS_UP", "STANDARD_PUSH_UP"
+            ]
+        )
+
+        # 8. Squat
+        squat = SquatAnalyzer()
+        self.register(
+            squat,
+            [
+                "SQUAT", "SQUATS", "BODYWEIGHT_SQUAT", "AIR_SQUAT"
+            ]
+        )
+
+        # 9. Pike Push-Up
+        pike = PikePushUpAnalyzer()
+        self.register(
+            pike,
+            [
+                "PIKE_PUSH_UP", "PIKE_PUSHUP", "PIKE_PRESS"
+            ]
+        )
+
+        # 10. L-Sit
+        l_sit = LSitAnalyzer()
+        self.register(
+            l_sit,
+            [
+                "L_SIT", "LSIT", "L_SIT_HOLD", "TUCK_L_SIT"
+            ]
+        )
+
     def get_analyzer(self, exercise_name: Optional[str]) -> BaseExerciseAnalyzer:
         """
         Resolve an exercise analyzer by name or code.
@@ -106,7 +146,15 @@ class ExerciseRegistry:
             return self._alias_map[clean]
 
         # Substring heuristics
-        if "FRONT_LEVER" in clean or "FRONTLEVER" in clean:
+        if "PIKE" in clean:
+            return self._alias_map["PIKE_PUSH_UP"]
+        elif "PUSH_UP" in clean or "PUSHUP" in clean or "PRESS_UP" in clean:
+            return self._alias_map["PUSH_UP"]
+        elif "SQUAT" in clean:
+            return self._alias_map["SQUAT"]
+        elif "L_SIT" in clean or "LSIT" in clean:
+            return self._alias_map["L_SIT"]
+        elif "FRONT_LEVER" in clean or "FRONTLEVER" in clean:
             return self._alias_map["FRONT_LEVER"]
         elif "HANDSTAND" in clean or "HSPU" in clean:
             return self._alias_map["HANDSTAND"]
@@ -126,10 +174,50 @@ class ExerciseRegistry:
         if not exercise_name:
             return False
         clean = self._normalize(exercise_name)
-        return clean in self._alias_map or any(k in clean for k in ["PLANCHE", "FRONT_LEVER", "HANDSTAND", "PULL_UP", "DIP", "MUSCLE"])
+        return clean in self._alias_map or any(
+            k in clean for k in [
+                "PLANCHE", "FRONT_LEVER", "HANDSTAND", "PULL_UP", "DIP",
+                "MUSCLE", "PUSH_UP", "PUSHUP", "SQUAT", "PIKE", "L_SIT", "LSIT"
+            ]
+        )
 
     def list_supported_exercises(self) -> List[Dict[str, Any]]:
         return [
+            {
+                "exercise": "PUSH_UP",
+                "name": "Push-up",
+                "type": "REPETITION",
+                "variations": ["PUSH_UP"],
+                "camera_view": "Side-on (45° or 90°) view at chest height"
+            },
+            {
+                "exercise": "SQUAT",
+                "name": "Squat",
+                "type": "REPETITION",
+                "variations": ["SQUAT"],
+                "camera_view": "Side or 45-degree angle showing full body"
+            },
+            {
+                "exercise": "PULL_UP",
+                "name": "Pull-Up",
+                "type": "REPETITION",
+                "variations": ["PULL_UP", "CHIN_UP"],
+                "camera_view": "Front or side view"
+            },
+            {
+                "exercise": "DIPS",
+                "name": "Parallel Bar Dips",
+                "type": "REPETITION",
+                "variations": ["DIPS"],
+                "camera_view": "Side-on view"
+            },
+            {
+                "exercise": "HANDSTAND",
+                "name": "Handstand & Handstand Push-up",
+                "type": "HOLD_AND_REPETITION",
+                "variations": ["HANDSTAND", "HANDSTAND_PUSHUP"],
+                "camera_view": "Side or front-diagonal view"
+            },
             {
                 "exercise": "PLANCHE",
                 "name": "Planche",
@@ -145,25 +233,18 @@ class ExerciseRegistry:
                 "camera_view": "Side-on (profile) view recommended"
             },
             {
-                "exercise": "HANDSTAND",
-                "name": "Handstand & Handstand Push-up",
-                "type": "HOLD_AND_REPETITION",
-                "variations": ["HANDSTAND", "HANDSTAND_PUSHUP"],
-                "camera_view": "Side or front-diagonal view"
+                "exercise": "PIKE_PUSH_UP",
+                "name": "Pike Push-up",
+                "type": "REPETITION",
+                "variations": ["PIKE_PUSH_UP"],
+                "camera_view": "Side-on view showing hips, shoulders, and wrists"
             },
             {
-                "exercise": "PULL_UP",
-                "name": "Pull-Up",
-                "type": "REPETITION",
-                "variations": ["PULL_UP", "CHIN_UP"],
-                "camera_view": "Front or side view"
-            },
-            {
-                "exercise": "DIPS",
-                "name": "Parallel Bar Dips",
-                "type": "REPETITION",
-                "variations": ["DIPS"],
-                "camera_view": "Side-on view"
+                "exercise": "L_SIT",
+                "name": "L-sit",
+                "type": "ISOMETRIC_HOLD",
+                "variations": ["L_SIT", "TUCK_L_SIT"],
+                "camera_view": "Side-on (profile) view at floor height"
             },
             {
                 "exercise": "MUSCLE_UP",

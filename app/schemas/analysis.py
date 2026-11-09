@@ -92,6 +92,7 @@ class PoseKeypoints(BaseModel):
     keypoints: Dict[str, KeypointData] = Field(..., description="Dictionary of mapped keypoints")
     bounding_box: List[float] = Field(..., description="[x1, y1, x2, y2] bounding box")
     detection_confidence: float = Field(..., description="Overall detection confidence")
+    derived_landmarks: Dict[str, KeypointData] = Field(default_factory=dict, description="Derived center landmarks (shoulder, hip, wrist, ankle, body)")
 
 
 class JointAngles(BaseModel):
@@ -286,6 +287,15 @@ class LandmarkItem(BaseModel):
     visible: bool = Field(..., description="True if keypoint confidence meets threshold")
 
 
+class LiveScoringMetric(BaseModel):
+    name: str = Field(..., description="Biomechanical metric name (e.g., body_alignment, range_of_motion)")
+    value: float = Field(..., description="Raw biomechanical measurement value (degrees/ratio)")
+    score: float = Field(..., description="Form score 0-100 for this metric")
+    weight: float = Field(..., description="Weight [0.0, 1.0] in overall exercise evaluation")
+    confidence: float = Field(1.0, description="Confidence/reliability of landmark detection [0.0, 1.0]")
+    status: str = Field("VALID", description="Metric evaluation status: VALID, LOW_CONFIDENCE, INSUFFICIENT_DATA")
+
+
 class LiveTiming(BaseModel):
     preprocessing_ms: float = Field(0.0, description="Preprocessing latency in ms")
     inference_ms: float = Field(0.0, description="YOLO pose inference latency in ms")
@@ -301,11 +311,16 @@ class LiveAnalysisResponse(BaseModel):
     pose_detected: bool = Field(False, alias="poseDetected", description="True if human pose is detected")
     confidence: float = Field(0.0, description="Overall pose detection confidence [0.0, 1.0]")
     score: Optional[float] = Field(None, description="Biomechanical form score [0.0, 100.0]")
+    current_score: Optional[float] = Field(None, alias="currentScore", description="Alias for score")
+    score_confidence: Optional[float] = Field(None, alias="scoreConfidence", description="Reliability score [0.0, 1.0]")
     is_valid_hold: bool = Field(False, alias="isValidHold", description="True if form meets valid hold standards")
     hold_duration_sec: Optional[float] = Field(None, alias="holdDurationSec", description="Continuous valid hold duration in seconds")
+    hold_duration_ms: Optional[int] = Field(None, alias="holdDurationMs", description="Hold duration in milliseconds")
     rep_count: Optional[int] = Field(None, alias="repCount", description="Repetition count for dynamic exercises")
     rep_phase: Optional[str] = Field(None, alias="repPhase", description="Current repetition phase (e.g., START, INFLECTION, LOCKOUT)")
+    phase: Optional[str] = Field(None, alias="phase", description="Current movement phase")
     measurements: Dict[str, float] = Field(default_factory=dict, description="Joint angles and alignment measurements")
+    scoring_metrics: List[LiveScoringMetric] = Field(default_factory=list, alias="metrics", description="Detailed scoring metrics breakdown")
     raw_measurements: Optional[Dict[str, float]] = Field(None, alias="rawMeasurements", description="Raw unsmoothed measurements before temporal filter")
     feedback: List[LiveFeedbackItem] = Field(default_factory=list, description="List of actionable coaching cues")
     missing_landmarks: List[str] = Field(default_factory=list, alias="missingLandmarks", description="Missing or unreliable landmark names")
@@ -313,6 +328,7 @@ class LiveAnalysisResponse(BaseModel):
     annotated_frame_base64: Optional[str] = Field(None, alias="annotatedFrameBase64", description="Optional base64 JPEG image with overlay skeleton")
     timing: Optional[LiveTiming] = Field(None, description="Latency breakdown in milliseconds")
     session_id: Optional[str] = Field(None, alias="sessionId", description="Associated analysis session ID")
+    session_summary: Optional[Dict[str, Any]] = Field(None, alias="sessionSummary", description="End of session performance summary")
 
     model_config = {
         "populate_by_name": True,

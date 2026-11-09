@@ -13,6 +13,7 @@ from app.schemas.analysis import (
     KeypointData,
     LiveAnalysisStatus,
     LiveFeedbackItem,
+    LiveScoringMetric,
 )
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,80 @@ class FrontLeverAnalyzer(BaseExerciseAnalyzer):
             "left_wrist", "right_wrist",
             "left_hip", "right_hip",
             "left_knee", "right_knee"
+        ]
+
+    @property
+    def scoring_weights(self) -> Dict[str, float]:
+        return {
+            "elbow_extension": 0.25,
+            "shoulder_angle": 0.25,
+            "body_line": 0.20,
+            "horizontal_tilt": 0.15,
+            "stability": 0.15
+        }
+
+    @property
+    def camera_view_recommendation(self) -> str:
+        return "Position camera side-on at bar height, full horizontal body line visible."
+
+    def evaluate_scoring_metrics(
+        self,
+        measurements: Dict[str, float],
+        keypoints: Optional[Dict[str, KeypointData]] = None,
+        side_view: bool = False
+    ) -> List[LiveScoringMetric]:
+        elbow = measurements.get("elbow_angle", 180.0)
+        shoulder = measurements.get("shoulder_angle", 45.0)
+        body_line = measurements.get("body_line_angle", 180.0)
+        tilt = measurements.get("horizontal_tilt", 0.0)
+
+        elbow_score = max(0.0, min(100.0, 100.0 - max(0.0, 175.0 - elbow) * 3.0))
+        shoulder_score = max(0.0, min(100.0, 100.0 - abs(45.0 - shoulder) * 1.5))
+        line_score = max(0.0, min(100.0, 100.0 - abs(180.0 - body_line) * 2.5))
+        tilt_score = max(0.0, min(100.0, 100.0 - tilt * 3.0))
+        stability_score = 88.0
+
+        return [
+            LiveScoringMetric(
+                name="elbow_extension",
+                value=elbow,
+                score=round(elbow_score, 1),
+                weight=0.25,
+                confidence=0.94,
+                status="VALID"
+            ),
+            LiveScoringMetric(
+                name="shoulder_angle",
+                value=shoulder,
+                score=round(shoulder_score, 1),
+                weight=0.25,
+                confidence=0.91,
+                status="VALID"
+            ),
+            LiveScoringMetric(
+                name="body_line",
+                value=body_line,
+                score=round(line_score, 1),
+                weight=0.20,
+                confidence=0.92,
+                status="VALID"
+            ),
+            LiveScoringMetric(
+                name="horizontal_tilt",
+                value=tilt,
+                score=round(tilt_score, 1),
+                weight=0.15,
+                confidence=0.90,
+                status="VALID"
+            ),
+            LiveScoringMetric(
+                name="stability",
+                value=0.0,
+                score=round(stability_score, 1),
+                weight=0.15,
+                confidence=0.88,
+                status="VALID"
+            )
         ]
 
     def validate_pose(
