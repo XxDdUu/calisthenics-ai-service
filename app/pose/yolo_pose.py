@@ -208,16 +208,27 @@ class YOLOPoseEstimator:
         Estimate pose keypoints from an RGB/BGR numpy image array.
         Returns (success: bool, PoseKeypoints or None).
         """
+        rid = get_request_id()
+
         if image_np is None or not isinstance(image_np, np.ndarray) or image_np.size == 0:
-            logger.warning("Empty or invalid image array provided to estimate_pose.")
+            logger.warning(
+                "[POSE_DIAGNOSTIC] request_id=%s decision=NO_PERSON reason='1. Invalid image input' "
+                "Empty or invalid image array provided to estimate_pose.",
+                rid
+            )
             return False, None
 
         if self.model is None:
-            logger.error("YOLO model is not initialized.")
+            logger.error(
+                "[POSE_DIAGNOSTIC] request_id=%s decision=NO_PERSON reason='2. YOLO inference failure' "
+                "YOLO model is not initialized.",
+                rid
+            )
             return False, None
 
-        rid = get_request_id()
         img_h, img_w = image_np.shape[:2]
+        img_dtype = str(image_np.dtype)
+        img_shape = tuple(image_np.shape)
 
         try:
             _t0 = time.perf_counter()
@@ -232,7 +243,11 @@ class YOLOPoseEstimator:
             logger.debug("[YOLO] request_id=%s inference_ms=%.1f image_shape=%dx%d", rid, t_inference_ms, img_w, img_h)
 
             if results is None or len(results) == 0:
-                logger.info("[YOLO] request_id=%s inference returned no results object.", rid)
+                logger.info(
+                    "[POSE_DIAGNOSTIC] request_id=%s decision=NO_PERSON reason='3. No bounding boxes detected' "
+                    "input_w=%d input_h=%d shape=%s dtype=%s inference_ms=%.1f boxes=0",
+                    rid, img_w, img_h, img_shape, img_dtype, t_inference_ms
+                )
                 return False, None
 
             res = results[0]
@@ -268,16 +283,28 @@ class YOLOPoseEstimator:
             logger.debug("[YOLO] request_id=%s inference boxes=%d keypoints=%s", rid, num_boxes, has_keypoints)
 
             if boxes is None or len(boxes) == 0:
-                logger.info("[YOLO] request_id=%s no bounding boxes detected.", rid)
+                logger.info(
+                    "[POSE_DIAGNOSTIC] request_id=%s decision=NO_PERSON reason='3. No bounding boxes detected' "
+                    "input_w=%d input_h=%d shape=%s dtype=%s inference_ms=%.1f boxes=0",
+                    rid, img_w, img_h, img_shape, img_dtype, t_inference_ms
+                )
                 return False, None
 
             if keypoints is None or getattr(keypoints, "data", None) is None or len(keypoints.data) == 0:
-                logger.info("[YOLO] request_id=%s boxes detected, but keypoints data is empty.", rid)
+                logger.info(
+                    "[POSE_DIAGNOSTIC] request_id=%s decision=NO_PERSON reason='4. Bounding box detected but keypoints missing' "
+                    "input_w=%d input_h=%d shape=%s dtype=%s inference_ms=%.1f boxes=%d",
+                    rid, img_w, img_h, img_shape, img_dtype, t_inference_ms, num_boxes
+                )
                 return False, None
 
             conf_tensor = getattr(boxes, "conf", None)
             if conf_tensor is None or len(conf_tensor) == 0:
-                logger.warning("[YOLO] request_id=%s bounding boxes missing confidence tensor.", rid)
+                logger.warning(
+                    "[POSE_DIAGNOSTIC] request_id=%s decision=NO_PERSON reason='3. No bounding boxes detected' "
+                    "bounding boxes missing confidence tensor.",
+                    rid
+                )
                 return False, None
 
             _t_kp_start = time.perf_counter()
@@ -286,7 +313,11 @@ class YOLOPoseEstimator:
             kp_data_tensor = keypoints.data
 
             if xyxy_tensor is None or len(xyxy_tensor) == 0:
-                logger.warning("[YOLO] request_id=%s bounding boxes missing xyxy coordinates.", rid)
+                logger.warning(
+                    "[POSE_DIAGNOSTIC] request_id=%s decision=NO_PERSON reason='3. No bounding boxes detected' "
+                    "bounding boxes missing xyxy coordinates.",
+                    rid
+                )
                 return False, None
 
             candidates = []
@@ -376,12 +407,23 @@ class YOLOPoseEstimator:
                 ))
 
             if not candidates:
-                logger.warning("[YOLO] request_id=%s no valid candidate extracted.", rid)
+                logger.warning(
+                    "[POSE_DIAGNOSTIC] request_id=%s decision=NO_PERSON "
+                    "reason='5. Keypoints detected but rejected by application-level filtering' "
+                    "input_w=%d input_h=%d shape=%s dtype=%s inference_ms=%.1f boxes=%d",
+                    rid, img_w, img_h, img_shape, img_dtype, t_inference_ms, num_boxes
+                )
                 return False, None
 
             if tracker is not None:
                 track_res = tracker.select_athlete(candidates)
                 if track_res is None:
+                    logger.warning(
+                        "[POSE_DIAGNOSTIC] request_id=%s decision=NO_PERSON "
+                        "reason='5. Keypoints detected but rejected by application-level filtering' "
+                        "input_w=%d input_h=%d tracker_rejected=True",
+                        rid, img_w, img_h
+                    )
                     return False, None
                 selected_cand, _ = track_res
             else:
@@ -403,10 +445,31 @@ class YOLOPoseEstimator:
             )
             t_kp_extract_ms = (time.perf_counter() - _t_kp_start) * 1000.0
             logger.debug("[TIMING] request_id=%s stage=keypoint_extraction duration_ms=%.2f", rid, t_kp_extract_ms)
+
+            kp_confs = [round(float(kp.confidence), 3) for kp in keypoints_dict.values()]
+            visible_kps_count = sum(1 for kp in keypoints_dict.values() if kp.visible)
+            confs_summary = [round(float(c), 3) for c in confs[:num_people]]
+            logger.info(
+                "[POSE_DIAGNOSTIC] request_id=%s decision=PERSON_DETECTED "
+                "input_w=%d input_h=%d shape=%s dtype=%s inference_ms=%.1f "
+                "num_boxes=%d person_confs=%s selected_conf=%.3f "
+                "extracted_keypoints=%d visible_keypoints=%d "
+                "kp_confs_min=%.3f kp_confs_avg=%.3f kp_confs_max=%.3f",
+                rid, img_w, img_h, img_shape, img_dtype, t_inference_ms,
+                num_boxes, confs_summary, best_conf,
+                len(keypoints_dict), visible_kps_count,
+                min(kp_confs) if kp_confs else 0.0,
+                sum(kp_confs) / len(kp_confs) if kp_confs else 0.0,
+                max(kp_confs) if kp_confs else 0.0
+            )
+
             return True, pose_kp
 
         except Exception as e:
-            logger.exception("Unexpected exception during YOLO pose estimation inference.")
+            logger.exception(
+                "[POSE_DIAGNOSTIC] request_id=%s decision=NO_PERSON reason='2. YOLO inference failure' error=%s",
+                rid, str(e)
+            )
             return False, None
 
     def _get_dominant_side(self, kps: Dict[str, "KeypointData"]) -> str:

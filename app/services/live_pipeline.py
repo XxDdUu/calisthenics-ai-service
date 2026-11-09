@@ -29,6 +29,21 @@ from app.services.live_session import LiveSession, session_manager
 logger = logging.getLogger(__name__)
 
 
+def detect_image_format(data: bytes) -> str:
+    """Detect image encoding format from magic bytes."""
+    if not data or len(data) < 4:
+        return "UNKNOWN"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "JPEG"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "PNG"
+    if data.startswith(b"RIFF") and len(data) >= 12 and data[8:12] == b"WEBP":
+        return "WEBP"
+    if data.startswith(b"BM"):
+        return "BMP"
+    return "UNKNOWN"
+
+
 class LiveAnalysisPipeline:
     """
     Production real-time frame processing pipeline:
@@ -57,7 +72,14 @@ class LiveAnalysisPipeline:
         set_request_id(rid)
 
         # 1. Frame Validation
+        format_name = detect_image_format(image_bytes)
         if not image_bytes or len(image_bytes) < 32:
+            t_total_ms = (time.perf_counter() - t_pipeline_start) * 1000.0
+            logger.warning(
+                "[POSE_DIAGNOSTIC] request_id=%s decision=NO_PERSON reason='1. Invalid image input' "
+                "format=%s bytes_len=%d",
+                rid, format_name, len(image_bytes) if image_bytes else 0
+            )
             return LiveAnalysisResponse(
                 status=LiveAnalysisStatus.INVALID_INPUT,
                 exercise=exercise,
@@ -73,7 +95,7 @@ class LiveAnalysisPipeline:
                         severity=FeedbackSeverity.ERROR
                     )
                 ],
-                timing=LiveTiming(total_ms=round((time.perf_counter() - t_pipeline_start) * 1000.0, 2)),
+                timing=LiveTiming(total_ms=round(t_total_ms, 2)),
                 session_id=session_id
             )
 
@@ -84,6 +106,12 @@ class LiveAnalysisPipeline:
         t_pre_ms = (time.perf_counter() - t_pre_start) * 1000.0
 
         if image_np is None or image_np.size == 0 or image_np.shape[0] < 32 or image_np.shape[1] < 32:
+            t_total_ms = (time.perf_counter() - t_pipeline_start) * 1000.0
+            logger.warning(
+                "[POSE_DIAGNOSTIC] request_id=%s decision=NO_PERSON reason='1. Invalid image input' "
+                "format=%s bytes_len=%d decode_success=%s",
+                rid, format_name, len(image_bytes), image_np is not None
+            )
             return LiveAnalysisResponse(
                 status=LiveAnalysisStatus.INVALID_INPUT,
                 exercise=exercise,
@@ -101,12 +129,17 @@ class LiveAnalysisPipeline:
                 ],
                 timing=LiveTiming(
                     preprocessing_ms=round(t_pre_ms, 2),
-                    total_ms=round((time.perf_counter() - t_pipeline_start) * 1000.0, 2)
+                    total_ms=round(t_total_ms, 2)
                 ),
                 session_id=session_id
             )
 
         img_h, img_w = image_np.shape[:2]
+        logger.info(
+            "[FRAME_INFERENCE_REQUEST] request_id=%s exercise=%s format=%s input_w=%d input_h=%d "
+            "shape=%s dtype=%s bytes=%d",
+            rid, exercise, format_name, img_w, img_h, tuple(image_np.shape), str(image_np.dtype), len(image_bytes)
+        )
 
         # Retrieve or initialize live session early for tracking & temporal smoothing
         session = session_manager.get_or_create(
@@ -123,6 +156,11 @@ class LiveAnalysisPipeline:
 
         if not success or pose_kp is None or not pose_kp.keypoints:
             t_total_ms = (time.perf_counter() - t_pipeline_start) * 1000.0
+            logger.info(
+                "[FRAME_INFERENCE_SUMMARY] request_id=%s exercise=%s pose_detected=False "
+                "status=NO_PERSON_DETECTED inference_ms=%.1f total_ms=%.1f",
+                rid, exercise, t_infer_ms, t_total_ms
+            )
             return LiveAnalysisResponse(
                 status=LiveAnalysisStatus.NO_PERSON_DETECTED,
                 exercise=exercise,
@@ -189,6 +227,14 @@ class LiveAnalysisPipeline:
                     severity=FeedbackSeverity.WARNING
                 )
             ]
+
+            logger.info(
+                "[FRAME_INFERENCE_SUMMARY] request_id=%s exercise=%s pose_detected=True "
+                "status=%s detection_confidence=%.3f landmarks_count=%d missing_landmarks=%s "
+                "inference_ms=%.1f total_ms=%.1f",
+                rid, exercise, pose_status.value if hasattr(pose_status, "value") else str(pose_status),
+                pose_kp.detection_confidence, len(landmarks_list), missing_lms, t_infer_ms, t_total_ms
+            )
 
             return LiveAnalysisResponse(
                 status=pose_status,
@@ -283,6 +329,15 @@ class LiveAnalysisPipeline:
             )
 
         t_total_ms = (time.perf_counter() - t_pipeline_start) * 1000.0
+
+        logger.info(
+            "[FRAME_INFERENCE_SUMMARY] request_id=%s exercise=%s pose_detected=True "
+            "status=VALID detection_confidence=%.3f score=%s landmarks_count=%d "
+            "inference_ms=%.1f analysis_ms=%.1f total_ms=%.1f",
+            rid, exercise, pose_kp.detection_confidence,
+            f"{overall_score:.1f}" if overall_score is not None else "None",
+            len(landmarks_list), t_infer_ms, t_analysis_ms, t_total_ms
+        )
 
         return LiveAnalysisResponse(
             status=LiveAnalysisStatus.VALID,
