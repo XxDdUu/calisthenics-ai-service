@@ -6,6 +6,7 @@ from app.biomechanics.angles import (
     get_point,
 )
 from app.biomechanics.phase_detector import ExercisePhaseDetector
+from app.biomechanics.push_up_counter import PushUpRepCounter
 from app.exercises.base import BaseExerciseAnalyzer
 from app.schemas.analysis import (
     FeedbackSeverity,
@@ -30,6 +31,7 @@ class PushUpAnalyzer(BaseExerciseAnalyzer):
     """
 
     def __init__(self):
+        self._fallback_counter = PushUpRepCounter()
         self.phase_detector = ExercisePhaseDetector(
             exercise_name="PUSH_UP",
             is_dynamic=True,
@@ -230,72 +232,87 @@ class PushUpAnalyzer(BaseExerciseAnalyzer):
         keypoints: Optional[Dict[str, KeypointData]] = None,
         side_view: bool = False
     ) -> List[LiveScoringMetric]:
-        elbow = measurements.get("elbow_angle", 180.0)
-        body_line = measurements.get("body_line_angle", 180.0)
-        elbow_diff = measurements.get("elbow_symmetry_diff", 0.0)
+        elbow = measurements.get("elbow_angle")
+        body_line = measurements.get("body_line_angle")
+        elbow_diff = measurements.get("elbow_symmetry_diff")
+
+        metrics: List[LiveScoringMetric] = []
 
         # 1. Body Alignment
-        align_score = max(0.0, min(100.0, 100.0 - abs(180.0 - body_line) * 2.0))
-
-        # 2. Range of Motion
-        if self.phase_detector.current_phase == "BOTTOM":
-            rom_score = max(20.0, min(100.0, 100.0 - max(0.0, elbow - 90.0) * 2.0))
-        elif self.phase_detector.current_phase in ("TOP", "START"):
-            rom_score = max(40.0, min(100.0, 100.0 - max(0.0, 165.0 - elbow) * 2.0))
-        else:
-            rom_score = 85.0
-
-        # 3. Elbow Movement & Flare
-        elbow_score = max(0.0, min(100.0, 100.0 - elbow_diff * 2.0))
-
-        # 4. Shoulder Positioning
-        shoulder_score = 85.0
-
-        # 5. Movement Control
-        control_score = 88.0
-
-        return [
-            LiveScoringMetric(
+        if body_line is not None:
+            align_score = max(0.0, min(100.0, 100.0 - abs(180.0 - body_line) * 2.0))
+            metrics.append(LiveScoringMetric(
                 name="body_alignment",
-                value=body_line,
+                value=round(body_line, 1),
                 score=round(align_score, 1),
-                weight=0.25,
+                weight=0.35,
                 confidence=0.95,
                 status="VALID"
-            ),
-            LiveScoringMetric(
+            ))
+        else:
+            metrics.append(LiveScoringMetric(
+                name="body_alignment", value=0.0, score=0.0, weight=0.35, confidence=0.0, status="INSUFFICIENT_DATA"
+            ))
+
+        # 2. Range of Motion
+        if elbow is not None:
+            if self.phase_detector.current_phase == "BOTTOM":
+                rom_score = max(20.0, min(100.0, 100.0 - max(0.0, elbow - 90.0) * 2.0))
+            elif self.phase_detector.current_phase in ("TOP", "START"):
+                rom_score = max(40.0, min(100.0, 100.0 - max(0.0, 165.0 - elbow) * 2.0))
+            else:
+                # Transitional angle progress score (full depth 90 -> 100, shallow -> proportional)
+                rom_score = max(40.0, min(100.0, 100.0 - max(0.0, elbow - 95.0) * 0.6))
+            metrics.append(LiveScoringMetric(
                 name="range_of_motion",
-                value=elbow,
+                value=round(elbow, 1),
                 score=round(rom_score, 1),
-                weight=0.25,
+                weight=0.35,
                 confidence=0.92,
                 status="VALID"
-            ),
-            LiveScoringMetric(
+            ))
+        else:
+            metrics.append(LiveScoringMetric(
+                name="range_of_motion", value=0.0, score=0.0, weight=0.35, confidence=0.0, status="INSUFFICIENT_DATA"
+            ))
+
+        # 3. Elbow Positioning & Symmetry
+        if elbow_diff is not None:
+            elbow_score = max(0.0, min(100.0, 100.0 - elbow_diff * 2.0))
+            metrics.append(LiveScoringMetric(
                 name="elbow_movement",
-                value=elbow_diff,
+                value=round(elbow_diff, 1),
                 score=round(elbow_score, 1),
-                weight=0.20,
-                confidence=0.90,
+                weight=0.30,
+                confidence=0.90 if not side_view else 0.70,
                 status="VALID"
-            ),
-            LiveScoringMetric(
-                name="shoulder_positioning",
-                value=0.0,
-                score=round(shoulder_score, 1),
-                weight=0.15,
-                confidence=0.85,
-                status="VALID"
-            ),
-            LiveScoringMetric(
-                name="movement_control",
-                value=0.0,
-                score=round(control_score, 1),
-                weight=0.15,
-                confidence=0.88,
-                status="VALID"
-            )
-        ]
+            ))
+        else:
+            metrics.append(LiveScoringMetric(
+                name="elbow_movement", value=0.0, score=0.0, weight=0.30, confidence=0.0, status="INSUFFICIENT_DATA"
+            ))
+
+        # 4. Shoulder Positioning (not reliably measurable without scapular landmarks on single 2D frame)
+        metrics.append(LiveScoringMetric(
+            name="shoulder_positioning",
+            value=0.0,
+            score=0.0,
+            weight=0.0,
+            confidence=0.0,
+            status="INSUFFICIENT_DATA"
+        ))
+
+        # 5. Movement Control / Tempo Consistency (evaluated at session level across completed reps)
+        metrics.append(LiveScoringMetric(
+            name="movement_control",
+            value=0.0,
+            score=0.0,
+            weight=0.0,
+            confidence=0.0,
+            status="INSUFFICIENT_DATA"
+        ))
+
+        return metrics
 
     def update_dynamic_state(
         self,
@@ -304,14 +321,23 @@ class PushUpAnalyzer(BaseExerciseAnalyzer):
         measurements: Dict[str, float],
         timestamp_sec: float
     ) -> Tuple[Optional[float], Optional[int], Optional[str]]:
-        elbow = measurements.get("elbow_angle", 180.0)
-        reps, phase = self.phase_detector.update_dynamic_rep(
-            primary_metric_value=elbow,
-            top_threshold=155.0,
-            bottom_threshold=95.0,
-            timestamp_sec=timestamp_sec,
-            is_valid_form=is_valid_frame
-        )
-        session.rep_count = reps
-        session.rep_phase = phase
-        return None, reps, phase
+        if hasattr(session, "get_push_up_counter"):
+            counter = session.get_push_up_counter()
+        elif hasattr(session, "push_up_counter") and session.push_up_counter is not None:
+            counter = session.push_up_counter
+        else:
+            counter = self._fallback_counter
+
+        if not is_valid_frame:
+            rep_res = counter.process_angle(None, timestamp_sec=timestamp_sec)
+        else:
+            elbow = measurements.get("elbow_angle", 180.0)
+            body_line = measurements.get("body_line_angle", 180.0)
+            rep_res = counter.process_angle(elbow, body_alignment=body_line, timestamp_sec=timestamp_sec)
+
+        if hasattr(session, "rep_count"):
+            session.rep_count = rep_res.rep_count
+        if hasattr(session, "rep_phase"):
+            session.rep_phase = rep_res.current_state
+
+        return None, rep_res.rep_count, rep_res.current_state

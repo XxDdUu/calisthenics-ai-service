@@ -216,62 +216,114 @@ class SquatAnalyzer(BaseExerciseAnalyzer):
         keypoints: Optional[Dict[str, KeypointData]] = None,
         side_view: bool = False
     ) -> List[LiveScoringMetric]:
-        knee = measurements.get("knee_angle", 180.0)
-        trunk_lean = measurements.get("trunk_lean_angle", measurements.get("torso_angle", 15.0))
-        knee_diff = measurements.get("knee_symmetry_diff", 0.0)
+        knee = measurements.get("knee_angle")
+        trunk_lean = measurements.get("trunk_lean_angle", measurements.get("torso_angle"))
+        knee_diff = measurements.get("knee_symmetry_diff")
         knee_ankle_ratio = measurements.get("knee_ankle_ratio", 1.0)
+        hip_angle = measurements.get("hip_angle")
 
-        # 1. Depth
-        if knee <= 100.0:
-            depth_score = max(60.0, min(100.0, 100.0 - max(0.0, knee - 90.0) * 1.5))
-        elif knee >= 155.0:
-            depth_score = 95.0
-        else:
-            depth_score = max(40.0, 100.0 - (knee - 95.0) * 1.2)
+        metrics: List[LiveScoringMetric] = []
 
-        # 2. Knee alignment & symmetry
-        knee_score = max(0.0, min(100.0, 100.0 - knee_diff * 2.0 - max(0.0, 1.0 - knee_ankle_ratio) * 40.0))
-
-        # 3. Torso position
-        trunk_score = max(0.0, min(100.0, 100.0 - max(0.0, trunk_lean - 25.0) * 2.5))
-
-        # 4. Movement control
-        control_score = 88.0
-
-        return [
-            LiveScoringMetric(
+        # 1. Squat Depth
+        if knee is not None:
+            if knee <= 100.0:
+                depth_score = max(60.0, min(100.0, 100.0 - max(0.0, knee - 90.0) * 1.5))
+            elif knee >= 155.0:
+                depth_score = 95.0
+            else:
+                depth_score = max(40.0, 100.0 - (knee - 95.0) * 1.2)
+            metrics.append(LiveScoringMetric(
                 name="squat_depth",
-                value=knee,
+                value=round(knee, 1),
                 score=round(depth_score, 1),
                 weight=0.35,
                 confidence=0.95,
                 status="VALID"
-            ),
-            LiveScoringMetric(
+            ))
+        else:
+            metrics.append(LiveScoringMetric(
+                name="squat_depth", value=0.0, score=0.0, weight=0.35, confidence=0.0, status="INSUFFICIENT_DATA"
+            ))
+
+        # 2. Knee Alignment & Valgus
+        if knee_diff is not None:
+            knee_score = max(0.0, min(100.0, 100.0 - knee_diff * 2.0 - max(0.0, 1.0 - knee_ankle_ratio) * 40.0))
+            metrics.append(LiveScoringMetric(
                 name="knee_alignment",
-                value=knee_diff,
+                value=round(knee_diff, 1),
                 score=round(knee_score, 1),
                 weight=0.25,
                 confidence=0.90,
                 status="VALID"
-            ),
-            LiveScoringMetric(
+            ))
+        else:
+            metrics.append(LiveScoringMetric(
+                name="knee_alignment", value=0.0, score=0.0, weight=0.25, confidence=0.0, status="INSUFFICIENT_DATA"
+            ))
+
+        # 3. Hip Positioning
+        if hip_angle is not None:
+            # At squat bottom or lockout, hip flexion tracks proportionally with knee flexion without excessive folding
+            hip_score = max(35.0, min(100.0, 100.0 - max(0.0, (180.0 - hip_angle) - 115.0) * 1.5))
+            metrics.append(LiveScoringMetric(
+                name="hip_positioning",
+                value=round(hip_angle, 1),
+                score=round(hip_score, 1),
+                weight=0.15,
+                confidence=0.88,
+                status="VALID"
+            ))
+        else:
+            metrics.append(LiveScoringMetric(
+                name="hip_positioning", value=0.0, score=0.0, weight=0.15, confidence=0.0, status="INSUFFICIENT_DATA"
+            ))
+
+        # 4. Torso Angle
+        if trunk_lean is not None:
+            trunk_score = max(0.0, min(100.0, 100.0 - max(0.0, trunk_lean - 25.0) * 2.5))
+            metrics.append(LiveScoringMetric(
                 name="torso_position",
-                value=trunk_lean,
+                value=round(trunk_lean, 1),
                 score=round(trunk_score, 1),
                 weight=0.25,
                 confidence=0.92,
                 status="VALID"
-            ),
-            LiveScoringMetric(
-                name="movement_control",
-                value=0.0,
-                score=round(control_score, 1),
-                weight=0.15,
-                confidence=0.88,
-                status="VALID"
-            )
-        ]
+            ))
+        else:
+            metrics.append(LiveScoringMetric(
+                name="torso_position", value=0.0, score=0.0, weight=0.25, confidence=0.0, status="INSUFFICIENT_DATA"
+            ))
+
+        # 5. Balance (Center of Mass alignment over ankles when keypoints available)
+        balance_metric = LiveScoringMetric(
+            name="balance", value=0.0, score=0.0, weight=0.0, confidence=0.0, status="INSUFFICIENT_DATA"
+        )
+        if keypoints:
+            l_hip, r_hip = get_point(keypoints.get("left_hip")), get_point(keypoints.get("right_hip"))
+            l_ak, r_ak = get_point(keypoints.get("left_ankle")), get_point(keypoints.get("right_ankle"))
+            l_sh, r_sh = get_point(keypoints.get("left_shoulder")), get_point(keypoints.get("right_shoulder"))
+            if (l_hip or r_hip) and (l_ak or r_ak):
+                hip_x = ((l_hip[0] + r_hip[0]) / 2.0) if (l_hip and r_hip) else (l_hip or r_hip)[0]
+                hip_y = ((l_hip[1] + r_hip[1]) / 2.0) if (l_hip and r_hip) else (l_hip or r_hip)[1]
+                ak_x = ((l_ak[0] + r_ak[0]) / 2.0) if (l_ak and r_ak) else (l_ak or r_ak)[0]
+                ak_y = ((l_ak[1] + r_ak[1]) / 2.0) if (l_ak and r_ak) else (l_ak or r_ak)[1]
+                leg_span = max(30.0, abs(ak_y - hip_y))
+                if (l_sh or r_sh):
+                    sh_y = ((l_sh[1] + r_sh[1]) / 2.0) if (l_sh and r_sh) else (l_sh or r_sh)[1]
+                    leg_span = max(leg_span, abs(ak_y - sh_y) * 0.5)
+                sway_ratio = abs(hip_x - ak_x) / leg_span
+                bal_score = max(20.0, min(100.0, 100.0 - max(0.0, sway_ratio - 0.18) * 140.0))
+                balance_metric = LiveScoringMetric(
+                    name="balance",
+                    value=round(sway_ratio * 100.0, 1),
+                    score=round(bal_score, 1),
+                    weight=0.10,
+                    confidence=0.80,
+                    status="VALID"
+                )
+        metrics.append(balance_metric)
+
+        return metrics
 
     def update_dynamic_state(
         self,

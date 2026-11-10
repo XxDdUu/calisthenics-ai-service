@@ -236,10 +236,35 @@ class LiveAnalysisPipeline:
                 pose_kp.detection_confidence, len(landmarks_list), missing_lms, t_infer_ms, t_total_ms
             )
 
-            # Inform session counter of tracking loss if squat
+            # Inform session counter of tracking loss if squat or push-up
             now_sec = (timestamp_ms / 1000.0) if timestamp_ms > 0 else time.time()
             if session.squat_counter is not None:
                 session.squat_counter.process_angle(None, timestamp_sec=now_sec)
+            if session.push_up_counter is not None:
+                session.push_up_counter.process_angle(None, timestamp_sec=now_sec)
+
+            active_state = None
+            knee_a = None
+            min_knee_a = None
+            elbow_a = None
+            min_elbow_a = None
+            avg_elbow_a = None
+            depth_val = None
+            reps_val = None
+
+            if session.squat_counter is not None:
+                active_state = session.squat_counter.state.value
+                knee_a = round(session.squat_counter.smoothed_knee_angle, 1)
+                min_knee_a = round(session.squat_counter.min_knee_angle, 1)
+                depth_val = session.squat_counter.depth_quality
+                reps_val = session.squat_counter.rep_count
+            elif session.push_up_counter is not None:
+                active_state = session.push_up_counter.state.value
+                elbow_a = round(session.push_up_counter.smoothed_elbow_angle, 1)
+                min_elbow_a = round(session.push_up_counter.min_elbow_angle, 1)
+                avg_elbow_a = round(session.push_up_counter.smoothed_elbow_angle, 1)
+                depth_val = session.push_up_counter.depth_quality
+                reps_val = session.push_up_counter.rep_count
 
             return LiveAnalysisResponse(
                 status=pose_status,
@@ -252,14 +277,17 @@ class LiveAnalysisPipeline:
                 feedback=feedback,
                 missing_landmarks=missing_lms,
                 landmarks=landmarks_list,
-                current_state=session.squat_counter.state.value if session.squat_counter else None,
-                knee_angle=round(session.squat_counter.smoothed_knee_angle, 1) if session.squat_counter else None,
-                min_knee_angle=round(session.squat_counter.min_knee_angle, 1) if session.squat_counter else None,
-                depth=session.squat_counter.depth_quality if session.squat_counter else None,
+                current_state=active_state,
+                knee_angle=knee_a,
+                min_knee_angle=min_knee_a,
+                elbow_angle=elbow_a,
+                average_elbow_angle=avg_elbow_a,
+                min_elbow_angle=min_elbow_a,
+                depth=depth_val,
                 is_tracking=False,
-                rep_count=session.squat_counter.rep_count if session.squat_counter else None,
-                rep_phase=session.squat_counter.state.value if session.squat_counter else None,
-                phase=session.squat_counter.state.value if session.squat_counter else None,
+                rep_count=reps_val,
+                rep_phase=active_state,
+                phase=active_state,
                 timing=LiveTiming(
                     preprocessing_ms=round(t_pre_ms, 2),
                     inference_ms=round(t_infer_ms, 2),
@@ -353,11 +381,47 @@ class LiveAnalysisPipeline:
         )
 
         sq_counter = session.squat_counter
-        current_state = sq_counter.state.value if sq_counter else rep_phase
-        knee_angle = round(sq_counter.smoothed_knee_angle, 1) if sq_counter else clean_measurements.get("knee_angle")
-        min_knee_angle = round(sq_counter.min_knee_angle, 1) if sq_counter else clean_measurements.get("knee_angle")
-        depth = sq_counter.depth_quality if sq_counter else None
-        is_tracking = sq_counter.is_tracking if sq_counter else True
+        pu_counter = session.push_up_counter
+
+        if sq_counter is not None:
+            current_state = sq_counter.state.value
+            knee_angle = round(sq_counter.smoothed_knee_angle, 1)
+            min_knee_angle = round(sq_counter.min_knee_angle, 1)
+            depth = sq_counter.depth_quality
+            is_tracking = sq_counter.is_tracking
+            elbow_angle = clean_measurements.get("elbow_angle")
+            left_elbow_angle = clean_measurements.get("elbow_left_angle")
+            right_elbow_angle = clean_measurements.get("elbow_right_angle")
+            average_elbow_angle = clean_measurements.get("avg_elbow_angle", elbow_angle)
+            min_elbow_angle = None
+            body_alignment = clean_measurements.get("body_line_angle", 180.0)
+            form_score = overall_score
+        elif pu_counter is not None:
+            current_state = pu_counter.state.value
+            knee_angle = clean_measurements.get("knee_angle")
+            min_knee_angle = None
+            depth = pu_counter.depth_quality
+            is_tracking = pu_counter.is_tracking
+            elbow_angle = round(pu_counter.smoothed_elbow_angle, 1)
+            left_elbow_angle = clean_measurements.get("elbow_left_angle")
+            right_elbow_angle = clean_measurements.get("elbow_right_angle")
+            average_elbow_angle = round(pu_counter.smoothed_elbow_angle, 1)
+            min_elbow_angle = round(pu_counter.min_elbow_angle, 1)
+            body_alignment = round(pu_counter.body_alignment, 1)
+            form_score = round(pu_counter.form_score, 1)
+        else:
+            current_state = rep_phase
+            knee_angle = clean_measurements.get("knee_angle")
+            min_knee_angle = clean_measurements.get("knee_angle")
+            depth = None
+            is_tracking = True
+            elbow_angle = clean_measurements.get("elbow_angle")
+            left_elbow_angle = clean_measurements.get("elbow_left_angle")
+            right_elbow_angle = clean_measurements.get("elbow_right_angle")
+            average_elbow_angle = clean_measurements.get("avg_elbow_angle", elbow_angle)
+            min_elbow_angle = None
+            body_alignment = clean_measurements.get("body_line_angle", 180.0)
+            form_score = overall_score
 
         return LiveAnalysisResponse(
             status=LiveAnalysisStatus.VALID,
@@ -378,6 +442,13 @@ class LiveAnalysisPipeline:
             current_state=current_state,
             knee_angle=knee_angle,
             min_knee_angle=min_knee_angle,
+            elbow_angle=elbow_angle,
+            left_elbow_angle=left_elbow_angle,
+            right_elbow_angle=right_elbow_angle,
+            average_elbow_angle=average_elbow_angle,
+            min_elbow_angle=min_elbow_angle,
+            body_alignment=body_alignment,
+            form_score=form_score,
             depth=depth,
             is_tracking=is_tracking,
             measurements=clean_measurements,

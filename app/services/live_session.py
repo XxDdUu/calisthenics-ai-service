@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from threading import Lock
 from typing import Any, Dict, List, Optional
 from app.biomechanics.feedback_engine import FeedbackEngine
+from app.biomechanics.push_up_counter import PushUpRepCounter
 from app.biomechanics.scoring_engine import ExerciseScoringEngine
 from app.biomechanics.smoothing import TemporalKeypointSmoother
 from app.biomechanics.squat_counter import SquatRepCounter
@@ -44,12 +45,19 @@ class LiveSession:
     rep_count: int = 0
     rep_phase: str = "START"
     squat_counter: Optional[SquatRepCounter] = None
+    push_up_counter: Optional[PushUpRepCounter] = None
 
     def get_squat_counter(self) -> SquatRepCounter:
         """Get or initialize the dedicated squat counter for this session."""
         if self.squat_counter is None:
             self.squat_counter = SquatRepCounter()
         return self.squat_counter
+
+    def get_push_up_counter(self) -> PushUpRepCounter:
+        """Get or initialize the dedicated push-up counter for this session."""
+        if self.push_up_counter is None:
+            self.push_up_counter = PushUpRepCounter()
+        return self.push_up_counter
 
     # Multi-person tracker, Scoring engine, Feedback engine
     tracker: PersonTracker = field(default_factory=PersonTracker)
@@ -146,6 +154,8 @@ class LiveSession:
         self.feedback_engine.reset()
         if self.squat_counter is not None:
             self.squat_counter.reset()
+        if self.push_up_counter is not None:
+            self.push_up_counter.reset()
         self.last_active_at = time.time()
         logger.info("LiveSession %s reset.", self.session_id)
 
@@ -178,8 +188,11 @@ class LiveSessionManager:
                     progression=progression,
                     side_view=side_view
                 )
-                if exercise.upper() == "SQUAT":
+                ex_upper = exercise.upper()
+                if ex_upper in ("SQUAT", "SQUATS"):
                     session.squat_counter = SquatRepCounter()
+                elif "PUSH_UP" in ex_upper or "PUSHUP" in ex_upper:
+                    session.push_up_counter = PushUpRepCounter()
                 self._sessions[sid] = session
                 logger.info("Created new LiveSession %s for exercise '%s'", sid, exercise)
             else:
@@ -191,10 +204,16 @@ class LiveSessionManager:
                     session.progression = progression
                     session.side_view = side_view
                     session.reset()
-                    if exercise.upper() == "SQUAT":
+                    ex_upper = exercise.upper()
+                    if ex_upper in ("SQUAT", "SQUATS"):
                         session.squat_counter = SquatRepCounter()
+                        session.push_up_counter = None
+                    elif "PUSH_UP" in ex_upper or "PUSHUP" in ex_upper:
+                        session.push_up_counter = PushUpRepCounter()
+                        session.squat_counter = None
                     else:
                         session.squat_counter = None
+                        session.push_up_counter = None
                 session.side_view = side_view
                 session.last_active_at = time.time()
 

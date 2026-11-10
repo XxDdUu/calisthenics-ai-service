@@ -801,16 +801,22 @@ class PlancheAnalyzer(BaseExerciseAnalyzer):
             tilt_score = max(0.0, 100.0 - (abs(tilt) - 10.0) * 4.0)
             tilt_status = "WARNING" if tilt_score >= 60.0 else "ERROR"
 
-        # 5. Scapular Protraction
-        scapular_score = 88.0
-        scapular_status = "VALID"
+        # 5. Scapular Protraction (requires anatomical depth/ear-shoulder scapular elevation markers not reliably separable in generic 2D pose without baseline calibration)
+        scapular_metric = LiveScoringMetric(
+            name="scapular_protraction",
+            value=0.0,
+            score=0.0,
+            weight=0.0,
+            confidence=0.0,
+            status="INSUFFICIENT_DATA"
+        )
 
         return [
             LiveScoringMetric(
                 name="arm_lockout",
                 value=elbow,
                 score=round(elbow_score, 1),
-                weight=0.25,
+                weight=0.30,
                 confidence=0.95,
                 status=elbow_status
             ),
@@ -818,7 +824,7 @@ class PlancheAnalyzer(BaseExerciseAnalyzer):
                 name="shoulder_lean",
                 value=lean,
                 score=round(lean_score, 1),
-                weight=0.25,
+                weight=0.30,
                 confidence=0.92,
                 status=lean_status
             ),
@@ -834,18 +840,11 @@ class PlancheAnalyzer(BaseExerciseAnalyzer):
                 name="body_line",
                 value=tilt,
                 score=round(tilt_score, 1),
-                weight=0.15,
+                weight=0.20,
                 confidence=0.90,
                 status=tilt_status
             ),
-            LiveScoringMetric(
-                name="scapular_protraction",
-                value=0.0,
-                score=round(scapular_score, 1),
-                weight=0.15,
-                confidence=0.88,
-                status=scapular_status
-            )
+            scapular_metric
         ]
 
 

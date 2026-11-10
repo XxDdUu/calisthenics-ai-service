@@ -62,59 +62,59 @@ class FrontLeverAnalyzer(BaseExerciseAnalyzer):
         keypoints: Optional[Dict[str, KeypointData]] = None,
         side_view: bool = False
     ) -> List[LiveScoringMetric]:
-        elbow = measurements.get("elbow_angle", 180.0)
-        shoulder = measurements.get("shoulder_angle", 45.0)
-        body_line = measurements.get("body_line_angle", 180.0)
-        tilt = measurements.get("horizontal_tilt", 0.0)
+        elbow = measurements.get("elbow_angle")
+        shoulder = measurements.get("shoulder_angle")
+        body_line = measurements.get("body_line_angle")
+        tilt = measurements.get("horizontal_tilt")
 
-        elbow_score = max(0.0, min(100.0, 100.0 - max(0.0, 175.0 - elbow) * 3.0))
-        shoulder_score = max(0.0, min(100.0, 100.0 - abs(45.0 - shoulder) * 1.5))
-        line_score = max(0.0, min(100.0, 100.0 - abs(180.0 - body_line) * 2.5))
-        tilt_score = max(0.0, min(100.0, 100.0 - tilt * 3.0))
-        stability_score = 88.0
+        metrics: List[LiveScoringMetric] = []
 
-        return [
-            LiveScoringMetric(
-                name="elbow_extension",
-                value=elbow,
-                score=round(elbow_score, 1),
-                weight=0.25,
-                confidence=0.94,
-                status="VALID"
-            ),
-            LiveScoringMetric(
-                name="shoulder_angle",
-                value=shoulder,
-                score=round(shoulder_score, 1),
-                weight=0.25,
-                confidence=0.91,
-                status="VALID"
-            ),
-            LiveScoringMetric(
-                name="body_line",
-                value=body_line,
-                score=round(line_score, 1),
-                weight=0.20,
-                confidence=0.92,
-                status="VALID"
-            ),
-            LiveScoringMetric(
-                name="horizontal_tilt",
-                value=tilt,
-                score=round(tilt_score, 1),
-                weight=0.15,
-                confidence=0.90,
-                status="VALID"
-            ),
-            LiveScoringMetric(
-                name="stability",
-                value=0.0,
-                score=round(stability_score, 1),
-                weight=0.15,
-                confidence=0.88,
-                status="VALID"
-            )
-        ]
+        if elbow is not None:
+            elbow_score = max(0.0, min(100.0, 100.0 - max(0.0, 175.0 - elbow) * 3.0))
+            metrics.append(LiveScoringMetric(
+                name="elbow_extension", value=round(elbow, 1), score=round(elbow_score, 1), weight=0.30, confidence=0.94, status="VALID"
+            ))
+        else:
+            metrics.append(LiveScoringMetric(
+                name="elbow_extension", value=0.0, score=0.0, weight=0.30, confidence=0.0, status="INSUFFICIENT_DATA"
+            ))
+
+        if shoulder is not None:
+            shoulder_score = max(0.0, min(100.0, 100.0 - abs(45.0 - shoulder) * 1.5))
+            metrics.append(LiveScoringMetric(
+                name="shoulder_angle", value=round(shoulder, 1), score=round(shoulder_score, 1), weight=0.25, confidence=0.91, status="VALID"
+            ))
+        else:
+            metrics.append(LiveScoringMetric(
+                name="shoulder_angle", value=0.0, score=0.0, weight=0.25, confidence=0.0, status="INSUFFICIENT_DATA"
+            ))
+
+        if body_line is not None:
+            line_score = max(0.0, min(100.0, 100.0 - abs(180.0 - body_line) * 2.5))
+            metrics.append(LiveScoringMetric(
+                name="body_line", value=round(body_line, 1), score=round(line_score, 1), weight=0.25, confidence=0.92, status="VALID"
+            ))
+        else:
+            metrics.append(LiveScoringMetric(
+                name="body_line", value=0.0, score=0.0, weight=0.25, confidence=0.0, status="INSUFFICIENT_DATA"
+            ))
+
+        if tilt is not None:
+            tilt_score = max(0.0, min(100.0, 100.0 - tilt * 3.0))
+            metrics.append(LiveScoringMetric(
+                name="horizontal_tilt", value=round(tilt, 1), score=round(tilt_score, 1), weight=0.20, confidence=0.90, status="VALID"
+            ))
+        else:
+            metrics.append(LiveScoringMetric(
+                name="horizontal_tilt", value=0.0, score=0.0, weight=0.20, confidence=0.0, status="INSUFFICIENT_DATA"
+            ))
+
+        # Hold consistency is evaluated across multi-frame hold history at session completion
+        metrics.append(LiveScoringMetric(
+            name="stability", value=0.0, score=0.0, weight=0.0, confidence=0.0, status="INSUFFICIENT_DATA"
+        ))
+
+        return metrics
 
     def validate_pose(
         self,
