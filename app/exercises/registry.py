@@ -73,7 +73,9 @@ class ExerciseRegistry:
         self.register(
             pull_up,
             [
-                "PULL_UP", "PULLUP", "CHIN_UP", "CHINUP"
+                "PULL_UP", "PULL_UPS", "PULLUP", "PULLUPS",
+                "CHIN_UP", "CHIN_UPS", "CHINUP", "CHINUPS",
+                "WIDE_PULL_UP", "STRICT_PULL_UP"
             ]
         )
 
@@ -100,7 +102,8 @@ class ExerciseRegistry:
         self.register(
             push_up,
             [
-                "PUSH_UP", "PUSHUP", "PRESS_UP", "STANDARD_PUSH_UP"
+                "PUSH_UP", "PUSH_UPS", "PUSHUP", "PUSHUPS",
+                "PRESS_UP", "PRESS_UPS", "STANDARD_PUSH_UP"
             ]
         )
 
@@ -109,7 +112,8 @@ class ExerciseRegistry:
         self.register(
             squat,
             [
-                "SQUAT", "SQUATS", "BODYWEIGHT_SQUAT", "AIR_SQUAT"
+                "SQUAT", "SQUATS", "BODYWEIGHT_SQUAT", "BODYWEIGHT_SQUATS",
+                "AIR_SQUAT", "AIR_SQUATS", "DEEP_SQUAT"
             ]
         )
 

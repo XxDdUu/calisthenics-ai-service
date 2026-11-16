@@ -13,8 +13,9 @@ class TemporalKeypointSmoother:
     """
 
     def __init__(self, alpha: Optional[float] = None, max_jump_distance_px: float = 120.0):
-        self.alpha = alpha if alpha is not None else settings.SMOOTHING_ALPHA
-        self.max_jump_distance_px = max_jump_distance_px
+        raw_alpha = alpha if alpha is not None else settings.SMOOTHING_ALPHA
+        self.alpha = max(0.0, min(1.0, float(raw_alpha)))
+        self.max_jump_distance_px = max(1.0, float(max_jump_distance_px))
         self._prev_keypoints: Dict[str, KeypointData] = {}
 
     def smooth(self, keypoints: Dict[str, KeypointData]) -> Dict[str, KeypointData]:
@@ -29,6 +30,12 @@ class TemporalKeypointSmoother:
         smoothed_result: Dict[str, KeypointData] = {}
 
         for name, curr in keypoints.items():
+            if not (math.isfinite(curr.x) and math.isfinite(curr.y) and math.isfinite(curr.confidence)):
+                smoothed_result[name] = KeypointData(
+                    x=0.0, y=0.0, confidence=0.0, name=curr.name or name, visible=False
+                )
+                continue
+
             prev = self._prev_keypoints.get(name)
 
             if prev is not None and prev.visible and curr.visible:
@@ -37,7 +44,7 @@ class TemporalKeypointSmoother:
                 if dist <= self.max_jump_distance_px:
                     smooth_x = self.alpha * curr.x + (1.0 - self.alpha) * prev.x
                     smooth_y = self.alpha * curr.y + (1.0 - self.alpha) * prev.y
-                    smooth_conf = self.alpha * curr.confidence + (1.0 - self.alpha) * prev.confidence
+                    smooth_conf = max(0.0, min(1.0, self.alpha * curr.confidence + (1.0 - self.alpha) * prev.confidence))
                     smoothed_kp = KeypointData(
                         x=round(smooth_x, 2),
                         y=round(smooth_y, 2),
@@ -186,6 +193,12 @@ class OneEuroKeypointSmoother:
         smoothed_result: Dict[str, KeypointData] = {}
 
         for name, curr in keypoints.items():
+            if not (math.isfinite(curr.x) and math.isfinite(curr.y) and math.isfinite(curr.confidence)):
+                smoothed_result[name] = KeypointData(
+                    x=0.0, y=0.0, confidence=0.0, name=curr.name or name, visible=False
+                )
+                continue
+
             if name not in self._filters:
                 self._filters[name] = OneEuroFilter2D(
                     freq=self.freq,
@@ -203,11 +216,12 @@ class OneEuroKeypointSmoother:
                     # Large teleportation jump - reset filter for this landmark
                     filter_2d.reset()
                     sx, sy = filter_2d.filter(curr.x, curr.y, timestamp_sec)
+                    smooth_conf = curr.confidence
                 else:
                     sx, sy = filter_2d.filter(curr.x, curr.y, timestamp_sec)
-                
-                # Confidence is smoothed via weighted EMA
-                smooth_conf = 0.7 * curr.confidence + 0.3 * prev.confidence
+                    smooth_conf = 0.7 * curr.confidence + 0.3 * prev.confidence
+
+                smooth_conf = max(0.0, min(1.0, smooth_conf))
                 smoothed_kp = KeypointData(
                     x=round(sx, 2),
                     y=round(sy, 2),

@@ -1,15 +1,8 @@
 import math
-from typing import Dict, Tuple, Optional
+from typing import Any, Dict, Optional, Tuple
 import numpy as np
 
-from app.schemas.analysis import KeypointData, JointAngles
-
-
-import math
-from typing import Dict, Tuple, Optional, Any
-import numpy as np
-
-from app.schemas.analysis import KeypointData, JointAngles
+from app.schemas.analysis import JointAngles, KeypointData
 
 
 def is_valid_coord(val: Any) -> bool:
@@ -175,11 +168,73 @@ def calculate_body_line_deviation(
         return angle, "PIKE" if cross > 0 else "SAG"
 
 
-def get_point(kp: Optional[KeypointData]) -> Optional[Tuple[float, float]]:
-    """Helper to extract (x, y) tuple if keypoint is visible and coordinates are valid."""
-    if kp and kp.visible and is_valid_coord(kp.x) and is_valid_coord(kp.y):
-        return (float(kp.x), float(kp.y))
+def get_point(
+    kp: Optional[KeypointData],
+    min_confidence: Optional[float] = None,
+) -> Optional[Tuple[float, float]]:
+    """Helper to extract (x, y) tuple if keypoint is visible, confident, and coordinates are finite."""
+    if kp is None or not kp.visible:
+        return None
+    if not (is_valid_coord(kp.x) and is_valid_coord(kp.y) and is_valid_coord(kp.confidence)):
+        return None
+    if min_confidence is not None and float(kp.confidence) < float(min_confidence):
+        return None
+    return (float(kp.x), float(kp.y))
+
+
+def compute_midpoint_coords(
+    p1: Optional[Tuple[float, float]],
+    p2: Optional[Tuple[float, float]],
+) -> Optional[Tuple[float, float]]:
+    """Compute 2D midpoint between two valid points, or return the single valid point if one is missing."""
+    p1_ok = is_valid_point(p1)
+    p2_ok = is_valid_point(p2)
+    if p1_ok and p2_ok:
+        assert p1 is not None and p2 is not None
+        return ((float(p1[0]) + float(p2[0])) / 2.0, (float(p1[1]) + float(p2[1])) / 2.0)
+    if p1_ok:
+        assert p1 is not None
+        return (float(p1[0]), float(p1[1]))
+    if p2_ok:
+        assert p2 is not None
+        return (float(p2[0]), float(p2[1]))
     return None
+
+
+def calculate_joint_angle_from_keypoints(
+    keypoints: Dict[str, KeypointData],
+    name_a: str,
+    name_vertex: str,
+    name_b: str,
+    min_confidence: Optional[float] = None,
+) -> Optional[float]:
+    """
+    Calculate 2D interior joint angle from named keypoints.
+    Returns None when any required landmark is missing, below confidence threshold, or degenerate.
+    """
+    if not keypoints:
+        return None
+    pt_a = get_point(keypoints.get(name_a), min_confidence=min_confidence)
+    pt_v = get_point(keypoints.get(name_vertex), min_confidence=min_confidence)
+    pt_b = get_point(keypoints.get(name_b), min_confidence=min_confidence)
+    if pt_a is None or pt_v is None or pt_b is None:
+        return None
+
+    mag1 = math.hypot(pt_a[0] - pt_v[0], pt_a[1] - pt_v[1])
+    mag2 = math.hypot(pt_b[0] - pt_v[0], pt_b[1] - pt_v[1])
+    if mag1 < 1e-6 or mag2 < 1e-6:
+        return None
+    return calculate_angle_2d(pt_a, pt_v, pt_b)
+
+
+def compute_bilateral_symmetry_diff(
+    left_angle: Optional[float],
+    right_angle: Optional[float],
+) -> Optional[float]:
+    """Compute absolute bilateral angle difference in degrees, or None if either side is unavailable."""
+    if not is_valid_coord(left_angle) or not is_valid_coord(right_angle):
+        return None
+    return round(abs(float(left_angle) - float(right_angle)), 1)
 
 
 def calculate_leg_spread_ratio(keypoints: Dict[str, KeypointData]) -> Optional[float]:

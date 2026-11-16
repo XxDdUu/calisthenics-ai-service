@@ -1,6 +1,6 @@
 from enum import Enum
 from typing import Any, Dict, List, Optional, Union
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ExerciseType(str, Enum):
@@ -17,6 +17,8 @@ class ExerciseType(str, Enum):
     HANDSTAND = "handstand"
     HANDSTAND_PUSHUP = "handstand_pushup"
     PULL_UP = "pull_up"
+    PUSH_UP = "push_up"
+    SQUAT = "squat"
     DIPS = "dips"
     MUSCLE_UP = "muscle_up"
 
@@ -411,15 +413,101 @@ class VideoOutputMetadata(BaseModel):
     fps: float = Field(..., description="Video frame rate (frames per second)")
 
 
+class MovementMetricItem(BaseModel):
+    name: str = Field(..., description="Metric name")
+    unit: str = Field("", description="Measurement unit (e.g. deg, ratio, s, %)")
+    value: Optional[float] = Field(None, description="Representative measured value")
+    min: Optional[float] = Field(None, description="Minimum measured value")
+    max: Optional[float] = Field(None, description="Maximum measured value")
+    avg: Optional[float] = Field(None, description="Average measured value")
+    targetRange: Optional[str] = Field(None, description="Target acceptable range")
+    score: Optional[float] = Field(None, description="Individual metric score [0.0, 100.0]")
+    status: str = Field("VALID", description="Metric status: VALID, WARNING, ERROR, UNAVAILABLE")
+    confidence: float = Field(0.0, description="Detection confidence [0.0, 1.0]")
+
+    @model_validator(mode="after")
+    def _enforce_unavailable_invariant(self) -> "MovementMetricItem":
+        if str(self.status).upper() == "UNAVAILABLE":
+            self.status = "UNAVAILABLE"
+            self.value = None
+            self.min = None
+            self.max = None
+            self.avg = None
+            self.score = None
+        return self
+
+
+class StructuredIssueItem(BaseModel):
+    code: str = Field(..., description="Stable issue identifier code")
+    metric: str = Field(..., description="Associated biomechanical metric key")
+    severity: IssueSeverity = Field(..., description="Issue severity: LOW, MEDIUM, HIGH")
+    title: str = Field(..., description="Short human-readable issue title")
+    message: str = Field(..., description="Detailed explanation of the form issue")
+    recommendation: Optional[str] = Field(None, description="Actionable coaching recommendation")
+    measuredValue: Optional[float] = Field(None, description="Measured value")
+    targetRange: Optional[str] = Field(None, description="Target acceptable range")
+    occurrences: int = Field(1, description="Number of occurrences across frames or reps")
+    affectedReps: List[int] = Field(default_factory=list, description="1-based rep numbers affected")
+
+    @field_validator("severity", mode="before")
+    @classmethod
+    def _normalize_severity(cls, v: Any) -> IssueSeverity:
+        if isinstance(v, IssueSeverity):
+            return v
+        if isinstance(v, str):
+            upper = v.strip().upper()
+            if upper in ("LOW", "MEDIUM", "HIGH"):
+                return IssueSeverity(upper)
+        raise ValueError(f"Invalid issue severity '{v}'. Expected LOW, MEDIUM, or HIGH.")
+
+
+class RepBreakdownItem(BaseModel):
+    repNumber: int = Field(..., description="1-based repetition index")
+    startFrame: int = Field(..., description="Start frame index in original video")
+    endFrame: int = Field(..., description="End frame index in original video")
+    startTimestampMs: int = Field(..., description="Start timestamp in milliseconds")
+    endTimestampMs: int = Field(..., description="End timestamp in milliseconds")
+    durationMs: int = Field(..., description="Repetition duration in milliseconds")
+    isValid: bool = Field(..., description="True if repetition met validity criteria")
+    status: str = Field(..., description="Repetition status (e.g. VALID, INCOMPLETE, POOR_FORM)")
+    formScore: Optional[float] = Field(None, description="Repetition form score [0.0, 100.0]")
+    minAngleDeg: Optional[float] = Field(None, description="Minimum primary angle reached in degrees")
+    maxAngleDeg: Optional[float] = Field(None, description="Maximum primary angle reached in degrees")
+    romDeg: Optional[float] = Field(None, description="Range of motion in degrees")
+    depthClassification: Optional[str] = Field(None, description="Depth classification (e.g. GOOD, MODERATE, SHALLOW)")
+    keyMetrics: Dict[str, Optional[float]] = Field(default_factory=dict, description="Key per-rep biomechanical metrics")
+    issues: List[str] = Field(default_factory=list, description="Issues detected during this rep")
+    feedback: List[str] = Field(default_factory=list, description="Coaching feedback for this rep")
+
+
+class CameraQualityAssessment(BaseModel):
+    overallQuality: str = Field(..., description="Overall camera setup quality: GOOD, FAIR, POOR")
+    score: float = Field(..., description="Camera quality score [0.0, 100.0]")
+    viewAngle: str = Field(..., description="Detected dominant view angle: SIDE, FRONT, OBLIQUE, UNKNOWN")
+    fullBodyVisibleRatio: float = Field(..., description="Ratio of sampled frames with full body visible [0.0, 1.0]")
+    averageConfidence: float = Field(..., description="Average landmark confidence across sampled frames [0.0, 1.0]")
+    missingLandmarks: List[str] = Field(default_factory=list, description="Frequently missing or occluded landmarks")
+    warnings: List[str] = Field(default_factory=list, description="Camera framing and lighting warnings")
+
+
 class VideoScoringResponse(BaseModel):
+    schemaVersion: str = Field("1.0", description="Response schema version")
     analysisId: str = Field(..., description="Unique UUID for this analysis session")
-    status: str = Field(..., description="Status: COMPLETED, FAILED, NO_PERSON_DETECTED, INSUFFICIENT_POSE_QUALITY")
+    status: str = Field(..., description="Status: COMPLETED, FAILED, NO_PERSON_DETECTED, INSUFFICIENT_POSE_QUALITY, INVALID_INPUT")
     exerciseId: Optional[Any] = Field(None, description="Exercise identifier (e.g., ID or code)")
     exercise: str = Field("PLANCHE", description="Normalized exercise name")
-    score: float = Field(..., description="Overall movement quality score [0.0, 100.0]")
-    formAccuracy: float = Field(0.0, description="Form accuracy score [0.0, 100.0]")
-    stability: float = Field(0.0, description="Stability score [0.0, 100.0]")
-    alignment: float = Field(0.0, description="Body alignment score [0.0, 100.0]")
+    score: Optional[float] = Field(None, description="Overall movement quality score [0.0, 100.0], or None when unavailable")
+    formAccuracy: Optional[float] = Field(None, description="Form accuracy score [0.0, 100.0], or None when unavailable")
+    stability: Optional[float] = Field(None, description="Stability score [0.0, 100.0], or None when unavailable")
+    alignment: Optional[float] = Field(None, description="Body alignment score [0.0, 100.0], or None when unavailable")
+    repCount: int = Field(0, description="Total repetitions detected")
+    validReps: int = Field(0, description="Number of valid repetitions")
+    incompleteReps: int = Field(0, description="Number of incomplete/invalid repetitions")
+    reps: List[RepBreakdownItem] = Field(default_factory=list, description="Per-repetition breakdown")
+    movementMetrics: Dict[str, MovementMetricItem] = Field(default_factory=dict, description="Structured per-metric summaries")
+    issues: List[StructuredIssueItem] = Field(default_factory=list, description="Structured biomechanical form issues")
+    recommendations: List[str] = Field(default_factory=list, description="Actionable coaching recommendations")
+    cameraQuality: Optional[CameraQualityAssessment] = Field(None, description="Camera framing and pose visibility assessment")
     metrics: Dict[str, Any] = Field(default_factory=dict, description="Exercise-specific metrics and angles")
     feedback: List[str] = Field(default_factory=list, description="Actionable mistakes and coaching suggestions")
     video: VideoOutputMetadata = Field(..., description="Video metadata and availability")

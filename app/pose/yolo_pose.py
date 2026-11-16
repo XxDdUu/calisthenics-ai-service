@@ -1,7 +1,8 @@
 import logging
 import os
+import threading
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 from app.utils.pose_refinement import refine_wrists
@@ -66,6 +67,62 @@ _RIGHT_LIMB_KPS = ["right_shoulder", "right_elbow", "right_wrist", "right_hip", 
 
 
 
+_MODEL_CACHE: Dict[str, Any] = {}
+_MODEL_CACHE_LOCK = threading.Lock()
+
+
+def clear_model_cache() -> None:
+    """Clear the cached YOLO model instances."""
+    with _MODEL_CACHE_LOCK:
+        _MODEL_CACHE.clear()
+
+
+def _resolve_device(device: Optional[str]) -> str:
+    """Resolve inference device cleanly, falling back to CPU when CUDA or MPS is unavailable."""
+    requested = (device if device is not None else settings.DEVICE or "cpu").strip()
+    lower = requested.lower()
+
+    try:
+        import torch
+
+        cuda_available = bool(torch.cuda.is_available())
+        mps_backend = getattr(getattr(torch, "backends", None), "mps", None)
+        mps_available = bool(mps_backend and mps_backend.is_available())
+    except Exception:
+        cuda_available = False
+        mps_available = False
+
+    if lower in ("", "auto"):
+        resolved = "cuda" if cuda_available else "cpu"
+        logger.info("Auto-resolved YOLO inference device to '%s'", resolved)
+        return resolved
+
+    if lower.startswith("cuda"):
+        if cuda_available:
+            return requested
+        logger.warning(
+            "Requested device '%s' but CUDA is unavailable; falling back to 'cpu'.",
+            requested,
+        )
+        return "cpu"
+
+    if lower == "mps":
+        if mps_available:
+            return "mps"
+        logger.warning(
+            "Requested device '%s' but MPS is unavailable; falling back to 'cpu'.",
+            requested,
+        )
+        return "cpu"
+
+    return requested
+
+
+def _on_predict_start_trace(predictor) -> None:
+    """Module-level Ultralytics callback delegating to YOLOPoseEstimator trace installer."""
+    YOLOPoseEstimator._install_trace_on_predictor(predictor)
+
+
 def _resolve_model_path(model_path: str) -> str:
     """Resolve model path to exist locally or fall back to model filename for Ultralytics download."""
     if not model_path:
@@ -92,15 +149,26 @@ class YOLOPoseEstimator:
     def __init__(self, model_path: Optional[str] = None, device: Optional[str] = None):
         self.model_path = model_path or settings.MODEL_PATH
         self.resolved_model_path = _resolve_model_path(self.model_path)
-        self.device = device or settings.DEVICE
+        self.device = _resolve_device(device)
         self.conf_threshold = settings.CONFIDENCE_THRESHOLD
         self.keypoint_conf_threshold = settings.KEYPOINT_CONF_THRESHOLD
         self.model = None
         self._init_model()
 
     def _init_model(self):
-        """Initialize YOLO model and verify it is a pose estimation model."""
+        """Initialize YOLO model (with shared in-process cache) and verify it is a pose estimation model."""
         resolved_path = self.resolved_model_path
+        with _MODEL_CACHE_LOCK:
+            cached_model = _MODEL_CACHE.get(resolved_path)
+            if cached_model is not None:
+                self.model = cached_model
+                logger.debug(
+                    "Reusing cached YOLO-Pose model from '%s' on device '%s'",
+                    resolved_path,
+                    self.device,
+                )
+                return
+
         logger.info(f"Loading YOLO-Pose model from '{resolved_path}' on device '{self.device}'...")
         try:
             from ultralytics import YOLO
@@ -115,11 +183,16 @@ class YOLOPoseEstimator:
                 self.model = None
                 raise ValueError(err_msg)
 
-            add_callback = getattr(model, "add_callback", None)
-            if callable(add_callback):
-                add_callback("on_predict_start", self._install_preprocess_trace)
+            if not getattr(model, "_pose_trace_callback_registered", False):
+                add_callback = getattr(model, "add_callback", None)
+                if callable(add_callback):
+                    add_callback("on_predict_start", _on_predict_start_trace)
+                    setattr(model, "_pose_trace_callback_registered", True)
 
-            self.model = model
+            with _MODEL_CACHE_LOCK:
+                _MODEL_CACHE.setdefault(resolved_path, model)
+                self.model = _MODEL_CACHE[resolved_path]
+
             logger.info(f"Successfully loaded YOLO-Pose model (task='{task}') from '{resolved_path}'")
         except Exception as e:
             logger.error(f"Failed to load YOLO-Pose model from '{resolved_path}': {e}", exc_info=True)
@@ -127,6 +200,11 @@ class YOLOPoseEstimator:
             raise RuntimeError(f"YOLO-Pose model initialization failed for '{resolved_path}': {str(e)}") from e
 
     def _install_preprocess_trace(self, predictor) -> None:
+        """Log the actual letterboxed tensor geometry without changing its pixels."""
+        YOLOPoseEstimator._install_trace_on_predictor(predictor)
+
+    @staticmethod
+    def _install_trace_on_predictor(predictor) -> None:
         """Log the actual letterboxed tensor geometry without changing its pixels."""
         if getattr(predictor, "_pose_preprocess_trace_installed", False):
             return

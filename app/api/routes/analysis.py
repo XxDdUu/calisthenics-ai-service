@@ -217,16 +217,21 @@ async def analyze_video(
     description="Analyzes uploaded video, calculates biomechanical metrics and form score, generates annotated MP4 skeleton overlay, and returns keypoints."
 )
 async def score_video(
-    file: UploadFile = File(..., description="Video file (MP4, MOV, AVI)"),
+    file: UploadFile = File(..., description="Video file (MP4, MOV, AVI, MKV, WEBM)"),
     exercise_id: Optional[str] = Query(None, description="Exercise ID"),
-    exercise: Optional[str] = Query(None, description="Exercise name or code (e.g. PLANCHE, FRONT_LEVER, PULL_UP)"),
+    exercise: Optional[str] = Query(
+        None,
+        description="Exercise name or code (e.g. SQUAT, PUSH_UP, PULL_UP, PLANCHE, FRONT_LEVER, HANDSTAND, DIPS, MUSCLE_UP)"
+    ),
     progression: Optional[str] = Query(None, description="Progression level"),
     sample_fps: int = Query(10, ge=1, le=30, description="Sampling rate in frames per second"),
     confidence_threshold: float = Query(0.25, ge=0.0, le=1.0, description="Keypoint confidence threshold"),
     side_view: bool = Query(False, description="Whether camera is positioned side-on"),
     analysis_id: Optional[str] = Query(None, description="Optional caller analysis UUID")
 ) -> VideoScoringResponse:
-    if not file.content_type or not (file.content_type.startswith("video/") or file.filename.endswith((".mp4", ".mov", ".avi", ".mkv"))):
+    content_type = (file.content_type or "").lower()
+    filename = (file.filename or "").lower()
+    if not (content_type.startswith("video/") or filename.endswith((".mp4", ".mov", ".avi", ".mkv", ".webm"))):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="File provided is not a supported video format."
@@ -240,7 +245,7 @@ async def score_video(
                 detail="Empty video file uploaded."
             )
 
-        chosen_exercise = exercise or progression or "PLANCHE"
+        chosen_exercise = (exercise or progression or "PLANCHE").strip()
         response = video_scoring_pipeline.process_video(
             video_bytes=content,
             exercise_name=chosen_exercise,
@@ -399,6 +404,38 @@ async def list_exercises() -> Dict[str, Any]:
                 "name": "Pull-Up",
                 "progressions": [
                     {"id": "pull_up", "name": "Strict Pull-Up", "target_criteria": {"dead_hang_elbow": ">= 160°", "top_chin_clearance_elbow": "<= 65°", "symmetry": "<= 15° difference"}}
+                ]
+            },
+            {
+                "id": "squat",
+                "name": "Squat",
+                "progressions": [
+                    {
+                        "id": "squat",
+                        "name": "Bodyweight Squat",
+                        "target_criteria": {
+                            "depth_knee": "<= 100° (thighs at or below parallel)",
+                            "lockout_knee": ">= 160° (full hip and knee extension at top)",
+                            "torso_lean": "<= 42° forward lean from vertical",
+                            "knee_alignment": "Knee-to-ankle ratio >= 0.82 (avoid knee valgus)"
+                        }
+                    }
+                ]
+            },
+            {
+                "id": "push_up",
+                "name": "Push-Up",
+                "progressions": [
+                    {
+                        "id": "push_up",
+                        "name": "Standard Push-Up",
+                        "target_criteria": {
+                            "depth_elbow": "<= 90° at bottom",
+                            "lockout_elbow": ">= 155° at top",
+                            "body_alignment": "165°–180° (straight shoulder-hip-ankle line, no sag or pike)",
+                            "symmetry": "<= 20° left/right elbow difference"
+                        }
+                    }
                 ]
             },
             {
